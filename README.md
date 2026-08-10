@@ -1,5 +1,3 @@
-markdown_content = """# ESP32 Tabanlı Ethernet PDKS ve Geçiş Kontrol Sistemi
-
 ## Proje Hakkında
 Bu proje, çok katlı binalar için tasarlanmış, çevrimdışı çalışabilme (offline-first) yeteneğine sahip, ESP32 tabanlı bir RFID geçiş kontrol ve Personel Devam Kontrol Sistemidir (PDKS). Sistem, ağ bağlantısı (Ethernet) veya MQTT sunucusu kopsa dahi kapı geçiş işlemlerini yerel yetki listesine (ACL) göre kesintisiz bir şekilde sürdürür. Ağ bağlantısı tekrar sağlandığında, çevrimdışıyken biriken veriler hiçbir kayıp yaşanmadan tekil olarak (MQTT QoS 1 ile) merkeze aktarılır.
 
