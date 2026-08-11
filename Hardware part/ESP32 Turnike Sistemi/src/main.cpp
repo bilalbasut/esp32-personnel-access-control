@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include "database.h"
 
 // --- 1. Pin Definitions ---
 
@@ -76,6 +77,79 @@ void loop() {
     Serial.println(scannedUID);
     
     // Add a blank line for readability
+    Serial.println("-------------------------");
+  }
+}
+
+void grantAccess() {
+  Serial.println("ACCESS GRANTED. Unlocking door...");
+  
+  digitalWrite(GREEN_LED_PIN, HIGH);
+  digitalWrite(RELAY_PIN, HIGH); // Trigger the relay (dry contact closes)
+  
+  // A pleasant, single 500ms confirmation beep
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(500);
+  digitalWrite(BUZZER_PIN, LOW);
+  
+  // Wait for the remainder of the 3-second unlock window
+  delay(2500); 
+  
+  // Secure the door again
+  digitalWrite(GREEN_LED_PIN, LOW);
+  digitalWrite(RELAY_PIN, LOW);
+  Serial.println("Door locked.");
+}
+
+void denyAccess() {
+  Serial.println("ACCESS DENIED. Unrecognized Card.");
+  
+  // Flash red LED and beep 3 times rapidly
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(RED_LED_PIN, HIGH);
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(150);
+    
+    digitalWrite(RED_LED_PIN, LOW);
+    digitalWrite(BUZZER_PIN, LOW);
+    delay(150);
+  }
+}
+
+bool isCardAuthorized(String scannedUID) {
+  scannedUID.trim(); 
+  
+  // It uses the array from database.h seamlessly
+  for (int i = 0; i < numAuthorizedCards; i++) {
+    if (scannedUID == authorizedCards[i]) {
+      return true; 
+    }
+  }
+  return false; 
+}
+
+// --- Main Loop Update ---
+
+void loop() {
+  if (Serial1.available() > 0) {
+    String scannedUID = "";
+    
+    while (Serial1.available() > 0) {
+      char incomingByte = Serial1.read(); 
+      scannedUID += incomingByte;
+      delay(2); 
+    }
+    
+    Serial.print("Card Scanned: ");
+    Serial.println(scannedUID);
+    
+    // Check the database and trigger the appropriate hardware sequence
+    if (isCardAuthorized(scannedUID)) {
+      grantAccess();
+    } else {
+      denyAccess();
+    }
+    
     Serial.println("-------------------------");
   }
 }
