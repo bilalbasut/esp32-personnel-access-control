@@ -54,5 +54,28 @@ void setup() {
 }
 
 void loop() {
-  // We will build the scanner logic here in Step 2
+  // Check if the scanner has sent any data to the ESP32
+  if (Serial1.available() > 0) {
+    
+    Serial.print("Card Scanned! Raw Data: ");
+    String scannedUID = "";
+    
+    // Read all incoming bytes while they are available
+    while (Serial1.available() > 0) {
+      // Read one byte from the scanner
+      char incomingByte = Serial1.read(); 
+      
+      // Add it to our string
+      scannedUID += incomingByte;
+      
+      // Small delay to allow the next byte to arrive in the buffer
+      delay(2); 
+    }
+    
+    // Print the final, complete card UID to the console
+    Serial.println(scannedUID);
+    
+    // Add a blank line for readability
+    Serial.println("-------------------------");
+  }
 }
