@@ -100,6 +100,29 @@ bool isCardAuthorized(String scannedUID) {
   return false;
 }
 
+  void logAccess(String timestamp, String scannedUID, bool isGranted) {
+  // Open the file in APPEND mode to safely add to the bottom of the list
+  File logFile = LittleFS.open("/logs.txt", FILE_APPEND);
+  
+  if (!logFile) {
+    Serial.println("Error: Could not open /logs.txt for appending.");
+    return;
+  }
+
+  // Convert the boolean into a readable string
+  String accessStatus = isGranted ? "GRANTED" : "DENIED";
+  
+  // Create a clean CSV format: Timestamp, UID, Status, SyncFlag
+  // Example: 2026/08/12 16:10:00,A1B2C3D4,GRANTED,0
+  String logEntry = timestamp + "," + scannedUID + "," + accessStatus + ",0";
+  
+  // Write it to the flash drive and close the file
+  logFile.println(logEntry);
+  logFile.close();
+  
+  Serial.println("Saved to offline queue -> " + logEntry);
+}
+
 // Define a MAC address for the ESP32 (Will be changed)
 byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
 
@@ -222,7 +245,7 @@ void setup() {
   
   // Initialize the File System first
   initFileSystem();
-  
+
   // Initialize Scanner on Serial1
   Serial1.begin(9600, SERIAL_8N1, SCANNER_RX_PIN, SCANNER_TX_PIN);
 
@@ -328,11 +351,20 @@ void loop() {
     Serial.print("] UID: ");
     Serial.print(scannedUID);
     
+    // Check the database and fire the hardware
     if (isCardAuthorized(scannedUID)) {
       Serial.println(" -> GRANTED");
+      
+      // Save to flash drive (true = Granted)
+      logAccess(String(timestamp), scannedUID, true);
+      
       grantAccess(); 
     } else {
       Serial.println(" -> DENIED");
+      
+      // Save to flash drive (false = Denied)
+      logAccess(String(timestamp), scannedUID, false);
+      
       denyAccess(); 
     }
   }
