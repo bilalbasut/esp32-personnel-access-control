@@ -40,12 +40,13 @@ bool isDenySequenceActive = false;
 unsigned long lastDenyStepTime = 0;
 int denyBeepCount = 0;
 bool denyLedState = false;
-
+bool hasDoorOpened = false;
 // --- 4. Hardware Control Functions ---
 void grantAccess() {
   // Cancel any active deny sequence to prevent LED conflicts
   isDenySequenceActive = false; 
   digitalWrite(RED_LED_PIN, LOW);
+  hasDoorOpened = false;
 
   // Start the 3-second relay timer
   isRelayActive = true;
@@ -220,11 +221,43 @@ void setup() {
 }
 
 // --- 5. Main Loop ---
+// --- 5. Main Loop ---
 void loop() {
+
+  handleHardwareTimers(); 
+
+  // --- 1. Exit Button Logic ---
+  // If the button is pressed (LOW) and the door isn't already unlocked
+  if (digitalRead(EXIT_BUTTON_PIN) == LOW && !isRelayActive) {
+    Serial.println("Exit Button Pressed -> GRANTED");
+    grantAccess();
+  }
+
+  // --- 2. Smart Auto-Relock (Anti-Tailgating) Logic ---
+  if (isRelayActive) {
+    bool currentDoorState = digitalRead(DOOR_SENSOR_PIN);
+    
+    // Detect if the door has been pushed open
+    if (currentDoorState == HIGH) {
+      hasDoorOpened = true; 
+    }
+    
+    // If the door was opened, and is now closed again, kill the 3-second timer early
+    if (hasDoorOpened && currentDoorState == LOW) {
+      isRelayActive = false;
+      digitalWrite(GREEN_LED_PIN, LOW);
+      digitalWrite(RELAY_PIN, LOW);
+      Serial.println("Door securely closed. Timer overridden, relocked early.");
+      
+      // Reset so it doesn't trigger repeatedly
+      hasDoorOpened = false; 
+    }
+  }
+
+  // --- 3. UART Scanner Logic ---
   if (Serial1.available() > 0) {
     String scannedUID = "";
     
-    // Read the incoming UART bytes from the scanner
     while (Serial1.available() > 0) {
       char incomingByte = Serial1.read(); 
       scannedUID += incomingByte;
@@ -233,20 +266,17 @@ void loop() {
     
     scannedUID.trim();
 
-    // Get the exact time from the I2C RTC
     DateTime now = rtc.now();
     char timestamp[25];
     sprintf(timestamp, "%04d/%02d/%02d %02d:%02d:%02d", 
             now.year(), now.month(), now.day(), 
             now.hour(), now.minute(), now.second());
 
-    // Print the formatted log
     Serial.print("[");
     Serial.print(timestamp);
     Serial.print("] UID: ");
     Serial.print(scannedUID);
     
-    // Check the database and fire the hardware
     if (isCardAuthorized(scannedUID)) {
       Serial.println(" -> GRANTED");
       grantAccess(); 
