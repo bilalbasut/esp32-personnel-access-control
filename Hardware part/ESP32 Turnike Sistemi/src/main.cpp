@@ -1,7 +1,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include "RTClib.h"
-#include "database.h" // temporary list will change when smallFS added
+#include "FS.h"
+#include <LittleFS.h>
 #include <SPI.h>
 #include <Ethernet.h>
 
@@ -76,13 +77,29 @@ void denyAccess() {
 
 bool isCardAuthorized(String scannedUID) {
   scannedUID.trim(); 
-  for (int i = 0; i < numAuthorizedCards; i++) {
-    if (scannedUID == authorizedCards[i]) {
-      return true; 
+  
+  // Open the file in READ mode
+  File file = LittleFS.open("/database.txt", FILE_READ);
+  if (!file) {
+    Serial.println("Error: Could not read database file.");
+    return false; 
+  }
+
+  // Loop through every line in the text file
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+    line.trim(); // Strip hidden carriage returns from the text file
+    
+    if (line == scannedUID) {
+      file.close(); // Always close the file to free up memory
+      return true;
     }
   }
-  return false; 
+  
+  file.close(); 
+  return false;
 }
+
 // Define a MAC address for the ESP32 (Will be changed)
 byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
 
@@ -166,11 +183,45 @@ void handleHardwareTimers() {
     }
   }
 }
+// --- 6. File System Initialization ---
+void initFileSystem() {
+  // The 'true' parameter enables auto-formatting on the very first boot
+  if (!LittleFS.begin(true)) {
+    Serial.println("CRITICAL ERROR: Failed to mount LittleFS!");
+    return;
+  }
+  Serial.println("LittleFS mounted successfully.");
+
+  // Check if our database file exists
+  if (!LittleFS.exists("/database.txt")) {
+    Serial.println("No database found. Creating default /database.txt...");
+    
+    // Open the file in WRITE mode
+    File file = LittleFS.open("/database.txt", FILE_WRITE);
+    if (!file) {
+      Serial.println("Error: Could not create database file.");
+      return;
+    }
+    
+    // Write your starter UIDs to the file
+    file.println("A1B2C3D4");
+    file.println("98765432");
+    file.close();
+    
+    Serial.println("Default database created.");
+  } else {
+    Serial.println("Existing /database.txt loaded.");
+  }
+}
+
 
 // --- 4. System Setup ---
 void setup() {
   Serial.begin(115200);
   delay(1000);
+  
+  // Initialize the File System first
+  initFileSystem();
   
   // Initialize Scanner on Serial1
   Serial1.begin(9600, SERIAL_8N1, SCANNER_RX_PIN, SCANNER_TX_PIN);
@@ -221,7 +272,7 @@ void setup() {
 }
 
 // --- 5. Main Loop ---
-// --- 5. Main Loop ---
+
 void loop() {
 
   handleHardwareTimers(); 
