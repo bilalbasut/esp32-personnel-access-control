@@ -6,6 +6,13 @@
 #include <SPI.h>
 #include <Ethernet.h>
 #include <ArduinoHttpClient.h>
+#include <Preferences.h>
+
+Preferences preferences;
+int readPointer = 0;  // Where the network task is currently reading/uploading
+int writePointer = 0; // Where the RFID task is currently saving new logs
+
+const int MAX_LOGS = 500; // Maximum offline logs before overwriting
 
 // --- 1. Hardware Pins ---
 // Outputs
@@ -101,27 +108,30 @@ bool isCardAuthorized(String scannedUID) {
   return false;
 }
 
-  void logAccess(String timestamp, String scannedUID, bool isGranted) {
-  // Open the file in APPEND mode to safely add to the bottom of the list
-  File logFile = LittleFS.open("/logs.txt", FILE_APPEND);
-  
-  if (!logFile) {
-    Serial.println("Error: Could not open /logs.txt for appending.");
-    return;
-  }
-
-  // Convert the boolean into a readable string
+void logAccess(String timestamp, String scannedUID, bool isGranted) {
   String accessStatus = isGranted ? "GRANTED" : "DENIED";
+  String logEntry = timestamp + "," + scannedUID + "," + accessStatus;
   
-  // Create a clean CSV format: Timestamp, UID, Status, SyncFlag
-  // Example: 2026/08/12 16:10:00,A1B2C3D4,GRANTED,0
-  String logEntry = timestamp + "," + scannedUID + "," + accessStatus + ",0";
+  // Create a specific filename based on the current write pointer
+  String filename = "/log_" + String(writePointer) + ".txt";
   
-  // Write it to the flash drive and close the file
-  logFile.println(logEntry);
-  logFile.close();
+  // Overwrite whatever was in that specific file slot
+  File logFile = LittleFS.open(filename, FILE_WRITE);
+  if (logFile) {
+    logFile.print(logEntry);
+    logFile.close();
+  }
   
-  Serial.println("Saved to offline queue -> " + logEntry);
+  Serial.println("Saved to slot " + String(writePointer) + " -> " + logEntry);
+  
+  // Advance the write pointer, and loop back to 0 if we hit the limit
+  writePointer++;
+  if (writePointer >= MAX_LOGS) {
+    writePointer = 0;
+  }
+  
+  // Save the new position to NVS immediately
+  preferences.putInt("writePtr", writePointer);
 }
 
 // Define a MAC address for the ESP32  ---> MUST CHANGE THESE BEFORE DEPLOYMENT <---
@@ -166,21 +176,17 @@ void networkTaskCode(void * pvParameters) {
     
     if (Ethernet.linkStatus() == LinkON) {
       
-      File logFile = LittleFS.open("/logs.txt", FILE_READ);
-      
-      if (logFile && logFile.size() > 0) {
+      // As long as the read pointer hasn't caught up to the write pointer
+      while (readPointer != writePointer) {
         
-        // 1. Jump to the last successfully sent byte (Saves Flash reads)
-        logFile.seek(lastSyncedPosition);
-        bool networkFailed = false;
-
-        while (logFile.available()) {
-          String logLine = logFile.readStringUntil('\n');
-          logLine.trim();
+        String filename = "/log_" + String(readPointer) + ".txt";
+        
+        if (LittleFS.exists(filename)) {
+          File logFile = LittleFS.open(filename, FILE_READ);
+          String logLine = logFile.readString();
+          logFile.close();
           
           if (logLine.length() > 0) {
-            
-            // Send to server
             String postData = "{\"log\":\"" + logLine + "\"}";
             
             http.beginRequest();
@@ -193,27 +199,29 @@ void networkTaskCode(void * pvParameters) {
 
             int statusCode = http.responseStatusCode();
             
+            // Wait for EXPLICIT server confirmation before moving the pointer
             if (statusCode == 200 || statusCode == 201) {
-              Serial.println("SYNC SUCCESS: " + logLine);
-              // 2. Update the RAM bookmark to the current position
-              lastSyncedPosition = logFile.position();
+              Serial.println("SERVER CONFIRMED SLOT " + String(readPointer) + ": " + logLine);
+              
+              // Advance the read pointer
+              readPointer++;
+              if (readPointer >= MAX_LOGS) {
+                readPointer = 0;
+              }
+              
+              // Save the confirmed state to NVS
+              preferences.putInt("readPtr", readPointer);
+              
             } else {
-              Serial.println("SYNC FAILED. Stopping queue.");
-              networkFailed = true;
-              break; // Break the while loop; stop trying to send logs until next cycle
+              Serial.println("SERVER REJECTED/FAILED. Halting queue.");
+              break; // Stop trying; we cannot advance the pointer without a 200 OK
             }
           }
-        }
-        
-        // 3. The Only Flash Write Operation
-        // If we reached the end of the file and the network never failed
-        if (!networkFailed && lastSyncedPosition == logFile.size()) {
-          logFile.close(); 
-          LittleFS.remove("/logs.txt"); // Delete the file ONE time
-          lastSyncedPosition = 0;       // Reset the RAM bookmark
-          Serial.println("All logs synced. Flash file wiped cleanly.");
         } else {
-          logFile.close(); 
+           // File doesn't exist for some reason, skip this pointer to unblock the queue
+           readPointer++;
+           if(readPointer >= MAX_LOGS) readPointer = 0;
+           preferences.putInt("readPtr", readPointer);
         }
       }
     }
@@ -303,6 +311,18 @@ void setup() {
   
   // Initialize the File System first
   initFileSystem();
+
+  // Initialize NVS
+  preferences.begin("access_system", false); 
+  
+  // Retrieve the pointers. If they don't exist yet, default to 0.
+  readPointer = preferences.getInt("readPtr", 0);
+  writePointer = preferences.getInt("writePtr", 0);
+  
+  Serial.print("Booted. Read Pointer: ");
+  Serial.print(readPointer);
+  Serial.print(" | Write Pointer: ");
+  Serial.println(writePointer);
 
   // Initialize Scanner on Serial1
   Serial1.begin(9600, SERIAL_8N1, SCANNER_RX_PIN, SCANNER_TX_PIN);
