@@ -27,7 +27,7 @@ void grantAccess() {
   digitalWrite(RELAY_PIN, HIGH); 
   
   digitalWrite(BUZZER_PIN, HIGH);
-  delay(500);
+  delay(250); // Buzzer sounds for 2.5 seconds  x
   digitalWrite(BUZZER_PIN, LOW);
   
   delay(2500); // Door remains unlocked for 3 seconds total
