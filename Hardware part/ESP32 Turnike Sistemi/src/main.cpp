@@ -2,6 +2,8 @@
 #include <Wire.h>
 #include "RTClib.h"
 #include "database.h" // temporary list will change when smallFS added
+#include <SPI.h>
+#include <Ethernet.h>
 
 // --- 1. Hardware Pins ---
 // Outputs
@@ -17,6 +19,10 @@
 // UART Scanner
 #define SCANNER_RX_PIN  27
 #define SCANNER_TX_PIN  26
+
+// --- W5500 Pins ---
+#define W5500_CS_PIN  5
+#define W5500_RST_PIN 4
 
 // --- 2. RTC Object ---
 RTC_DS3231 rtc;
@@ -57,6 +63,47 @@ bool isCardAuthorized(String scannedUID) {
   }
   return false; 
 }
+// Define a MAC address for the ESP32 (Will be changed)
+byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
+
+// Define a FreeRTOS Task Handle
+TaskHandle_t NetworkTask;
+
+// --- The Core 0 Network Function ---
+// Everything inside this function runs entirely on Core 0 in the background.
+void networkTaskCode(void * pvParameters) {
+  
+  Serial.print("Network Task running on Core: ");
+  Serial.println(xPortGetCoreID());
+
+  // Hard-reset the W5500 on boot for stability
+  pinMode(W5500_RST_PIN, OUTPUT);
+  digitalWrite(W5500_RST_PIN, LOW);
+  delay(100);
+  digitalWrite(W5500_RST_PIN, HIGH);
+  delay(500);
+  
+  Ethernet.init(W5500_CS_PIN);
+  
+  if (Ethernet.begin(mac) == 0) {
+    Serial.println("Failed to configure Ethernet using DHCP");
+  } else {
+    Serial.print("Ethernet connected! IP Address: ");
+    Serial.println(Ethernet.localIP());
+  }
+
+  // This infinite loop runs forever on Core 0
+  for(;;) {
+    
+    // Maintain the network DHCP lease
+    Ethernet.maintain(); 
+    
+    // ---> LATER WILL ADD THE SERVER UPLOAD LOGIC HERE <---
+
+    // CRITICAL: FreeRTOS tasks must have a delay, or the watchdog timer will crash the ESP32
+    vTaskDelay(100 / portTICK_PERIOD_MS); 
+  }
+}
 
 // --- 4. System Setup ---
 void setup() {
@@ -93,6 +140,22 @@ void setup() {
   }
 
   Serial.println("System Ready. Waiting for card scan...");
+
+  // Launch the Network Task on Core 0
+  // Parameters: Function Name, Task Name, Stack Size, Task Input, Priority, Handle, Core ID
+  xTaskCreatePinnedToCore(
+    networkTaskCode,   
+    "NetworkTask",     
+    10000,            
+    NULL,              
+    1,                 
+    &NetworkTask,      
+    0                  
+  );
+  
+  // By default, your standard setup() and loop() are already running on Core 1.
+  Serial.print("Main hardware loop running on Core: ");
+  Serial.println(xPortGetCoreID());
 }
 
 // --- 5. Main Loop ---
