@@ -123,7 +123,7 @@ bool isCardAuthorized(String scannedUID) {
   Serial.println("Saved to offline queue -> " + logEntry);
 }
 
-// Define a MAC address for the ESP32 (Will be changed)
+// Define a MAC address for the ESP32  ---> MUST CHANGE THESE BEFORE DEPLOYMENT <---
 byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
 
 // Define a FreeRTOS Task Handle
@@ -145,7 +145,7 @@ void networkTaskCode(void * pvParameters) {
   
   Ethernet.init(W5500_CS_PIN);
   
-  if (Ethernet.begin(mac) == 0) {
+  if (Ethernet.begin(mac) == 0) {             // ---> Might change depending whether you use DHCP or static IP <---
     Serial.println("Failed to configure Ethernet using DHCP");
   } else {
     Serial.print("Ethernet connected! IP Address: ");
@@ -226,7 +226,7 @@ void initFileSystem() {
       return;
     }
     
-    // Write your starter UIDs to the file
+    // Write your starter UIDs to the file ---> MUST CHANGE THESE BEFORE DEPLOYMENT <---
     file.println("A1B2C3D4");
     file.println("98765432");
     file.close();
