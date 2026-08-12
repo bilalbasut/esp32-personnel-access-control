@@ -27,31 +27,50 @@
 // --- 2. RTC Object ---
 RTC_DS3231 rtc;
 
-// --- 3. Hardware Control Functions ---
+// --- 3. Non-Blocking Timer Variables ---
+// Relay & Success Beep Timers
+unsigned long relayStartTime = 0;
+bool isRelayActive = false;
+
+unsigned long successBeepStartTime = 0;
+bool isSuccessBeepActive = false;
+
+// Deny Sequence Timers
+bool isDenySequenceActive = false;
+unsigned long lastDenyStepTime = 0;
+int denyBeepCount = 0;
+bool denyLedState = false;
+
+// --- 4. Hardware Control Functions ---
 void grantAccess() {
+  // Cancel any active deny sequence to prevent LED conflicts
+  isDenySequenceActive = false; 
+  digitalWrite(RED_LED_PIN, LOW);
+
+  // Start the 3-second relay timer
+  isRelayActive = true;
+  relayStartTime = millis();
   digitalWrite(GREEN_LED_PIN, HIGH);
   digitalWrite(RELAY_PIN, HIGH); 
   
+  // Start the 250ms buzzer timer
+  isSuccessBeepActive = true;
+  successBeepStartTime = millis();
   digitalWrite(BUZZER_PIN, HIGH);
-  delay(250); // Buzzer sounds for 2.5 seconds  x
-  digitalWrite(BUZZER_PIN, LOW);
-  
-  delay(2500); // Door remains unlocked for 3 seconds total
-  
-  digitalWrite(GREEN_LED_PIN, LOW);
-  digitalWrite(RELAY_PIN, LOW);
 }
 
 void denyAccess() {
-  for (int i = 0; i < 3; i++) {
-    digitalWrite(RED_LED_PIN, HIGH);
-    digitalWrite(BUZZER_PIN, HIGH);
-    delay(150);
-    
-    digitalWrite(RED_LED_PIN, LOW);
-    digitalWrite(BUZZER_PIN, LOW);
-    delay(150);
-  }
+  // If the door is already unlocked, ignore the deny beep so it doesn't lock people out
+  if (isRelayActive) return; 
+
+  // Start the deny sequence state machine
+  isDenySequenceActive = true;
+  denyBeepCount = 0;
+  denyLedState = true; // Start with LEDs ON
+  lastDenyStepTime = millis();
+  
+  digitalWrite(RED_LED_PIN, HIGH);
+  digitalWrite(BUZZER_PIN, HIGH);
 }
 
 bool isCardAuthorized(String scannedUID) {
@@ -102,6 +121,48 @@ void networkTaskCode(void * pvParameters) {
 
     // CRITICAL: FreeRTOS tasks must have a delay, or the watchdog timer will crash the ESP32
     vTaskDelay(100 / portTICK_PERIOD_MS); 
+  }
+}
+
+void handleHardwareTimers() {
+  unsigned long currentMillis = millis();
+
+  // 1. Check Relay Timer (3000ms / 3 seconds)
+  if (isRelayActive && (currentMillis - relayStartTime >= 3000)) {
+    isRelayActive = false;
+    digitalWrite(GREEN_LED_PIN, LOW);
+    digitalWrite(RELAY_PIN, LOW);
+  }
+
+  // 2. Check Success Beep Timer (250ms)
+  if (isSuccessBeepActive && (currentMillis - successBeepStartTime >= 250)) {
+    isSuccessBeepActive = false;
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+
+  // 3. Check Deny Sequence Timer (Rapid 150ms toggles)
+  if (isDenySequenceActive) {
+    if (currentMillis - lastDenyStepTime >= 150) {
+      lastDenyStepTime = currentMillis; // Reset the stopwatch for the next toggle
+      
+      if (denyLedState) {
+        // Hardware was ON, turn it OFF
+        digitalWrite(RED_LED_PIN, LOW);
+        digitalWrite(BUZZER_PIN, LOW);
+        denyLedState = false;
+        denyBeepCount++; // Count one full beep
+      } else {
+        // Hardware was OFF, check if we need another beep
+        if (denyBeepCount < 3) {
+          digitalWrite(RED_LED_PIN, HIGH);
+          digitalWrite(BUZZER_PIN, HIGH);
+          denyLedState = true;
+        } else {
+          // 3 beeps completed, end the sequence
+          isDenySequenceActive = false;
+        }
+      }
+    }
   }
 }
 
