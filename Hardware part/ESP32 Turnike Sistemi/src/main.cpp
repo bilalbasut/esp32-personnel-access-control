@@ -5,6 +5,7 @@
 #include <LittleFS.h>
 #include <SPI.h>
 #include <Ethernet.h>
+#include <ArduinoHttpClient.h>
 
 // --- 1. Hardware Pins ---
 // Outputs
@@ -126,17 +127,25 @@ bool isCardAuthorized(String scannedUID) {
 // Define a MAC address for the ESP32  ---> MUST CHANGE THESE BEFORE DEPLOYMENT <---
 byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
 
+char serverAddress[] = "192.168.1.100";  // Your server IP address
+int port = 8080;                         // Server port
+String apiPath = "/api/access-logs";     // API endpoint
+
+EthernetClient ethClient;
+HttpClient http = HttpClient(ethClient, serverAddress, port);
+
+// --- RAM Tracker for Flash Wear Prevention ---
+size_t lastSyncedPosition = 0;
+
 // Define a FreeRTOS Task Handle
 TaskHandle_t NetworkTask;
 
 // --- The Core 0 Network Function ---
 // Everything inside this function runs entirely on Core 0 in the background.
 void networkTaskCode(void * pvParameters) {
-  
   Serial.print("Network Task running on Core: ");
   Serial.println(xPortGetCoreID());
 
-  // Hard-reset the W5500 on boot for stability
   pinMode(W5500_RST_PIN, OUTPUT);
   digitalWrite(W5500_RST_PIN, LOW);
   delay(100);
@@ -145,23 +154,72 @@ void networkTaskCode(void * pvParameters) {
   
   Ethernet.init(W5500_CS_PIN);
   
-  if (Ethernet.begin(mac) == 0) {             // ---> Might change depending whether you use DHCP or static IP <---
+  if (Ethernet.begin(mac) == 0) {
     Serial.println("Failed to configure Ethernet using DHCP");
   } else {
     Serial.print("Ethernet connected! IP Address: ");
     Serial.println(Ethernet.localIP());
   }
 
-  // This infinite loop runs forever on Core 0
   for(;;) {
-    
-    // Maintain the network DHCP lease
     Ethernet.maintain(); 
     
-    // ---> LATER WILL ADD THE SERVER UPLOAD LOGIC HERE <---
+    if (Ethernet.linkStatus() == LinkON) {
+      
+      File logFile = LittleFS.open("/logs.txt", FILE_READ);
+      
+      if (logFile && logFile.size() > 0) {
+        
+        // 1. Jump to the last successfully sent byte (Saves Flash reads)
+        logFile.seek(lastSyncedPosition);
+        bool networkFailed = false;
 
-    // CRITICAL: FreeRTOS tasks must have a delay, or the watchdog timer will crash the ESP32
-    vTaskDelay(100 / portTICK_PERIOD_MS); 
+        while (logFile.available()) {
+          String logLine = logFile.readStringUntil('\n');
+          logLine.trim();
+          
+          if (logLine.length() > 0) {
+            
+            // Send to server
+            String postData = "{\"log\":\"" + logLine + "\"}";
+            
+            http.beginRequest();
+            http.post(apiPath);
+            http.sendHeader("Content-Type", "application/json");
+            http.sendHeader("Content-Length", postData.length());
+            http.beginBody();
+            http.print(postData);
+            http.endRequest();
+
+            int statusCode = http.responseStatusCode();
+            
+            if (statusCode == 200 || statusCode == 201) {
+              Serial.println("SYNC SUCCESS: " + logLine);
+              // 2. Update the RAM bookmark to the current position
+              lastSyncedPosition = logFile.position();
+            } else {
+              Serial.println("SYNC FAILED. Stopping queue.");
+              networkFailed = true;
+              break; // Break the while loop; stop trying to send logs until next cycle
+            }
+          }
+        }
+        
+        // 3. The Only Flash Write Operation
+        // If we reached the end of the file and the network never failed
+        if (!networkFailed && lastSyncedPosition == logFile.size()) {
+          logFile.close(); 
+          LittleFS.remove("/logs.txt"); // Delete the file ONE time
+          lastSyncedPosition = 0;       // Reset the RAM bookmark
+          Serial.println("All logs synced. Flash file wiped cleanly.");
+        } else {
+          logFile.close(); 
+        }
+      }
+    }
+
+    // Task sleeps for 5 seconds
+    vTaskDelay(5000 / portTICK_PERIOD_MS); 
   }
 }
 
