@@ -36,7 +36,7 @@ Preferences preferences;
 int readPointer = 0;         // Tracks which log needs to be sent next
 int writePointer = 0;        // Tracks where the next scanned card should be saved
 uint32_t globalSequence = 0; // Lifetime scan counter for deduplication
-
+int currentAclVersion = 0; // Tracks the local database version
 const int MAX_LOGS = 500;    // Maximum offline capacity before overwriting old logs
 
 // --- Hardware Pins ---
@@ -220,8 +220,7 @@ void logAccess(DateTime now, String scannedUID, uint8_t resultCode) {
 }
 
 
-// --- 7. MQTT CALLBACK (FR-08 COMPLIANCE) ---
-
+// --- 7. MQTT CALLBACK (FR-08 & FR-09 COMPLIANCE) ---
 // This function fires automatically when the server sends a message to the ESP32
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   // Convert incoming payload to a String
@@ -230,13 +229,13 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     message += (char)payload[i];
   }
   
-  // If the message is an ACK from the server
+  // --- FR-08: Handle ACKs from the server ---
   if (String(topic) == topic_event_ack) {
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, message);
     
     if (!error) {
-      uint32_t ack_seq = doc["ack_seq"]; // Parse the sequence number
+      uint32_t ack_seq = doc["ack_seq"]; 
       
       // Load the current log waiting in the queue to verify the sequence matches
       String filename = "/log_" + String(readPointer) + ".bin";
@@ -256,8 +255,50 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       }
     }
   }
+  
+  // --- FR-09: Handle Remote ACL Updates ---
+  else if (String(topic) == "pdks/merkez/cfg/acl") {
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, message);
+    
+    if (!error) {
+      int newVersion = doc["ver"]; // Extract the server's ACL version
+      
+      // Compare versions to prevent unnecessary flash wear
+      if (newVersion > currentAclVersion) {
+        Serial.println("New ACL version (" + String(newVersion) + ") detected. Updating database...");
+        
+        // Open in FILE_WRITE mode to wipe the old list
+        File dbFile = LittleFS.open("/database.txt", FILE_WRITE);
+        
+        if (dbFile) {
+          // Extract the array of cards
+          JsonArray cards = doc["cards"].as<JsonArray>();
+          
+          // Loop through every card object in the JSON array
+          for (JsonVariant v : cards) {
+            String uid = v["uid"].as<String>();
+            dbFile.println(uid); // Write just the UID string to our text file
+          }
+          
+          dbFile.close();
+          
+          // Save the new version to RAM and NVS
+          currentAclVersion = newVersion;
+          preferences.putInt("acl_ver", currentAclVersion);
+          
+          Serial.println("Database updated successfully.");
+        } else {
+          Serial.println("Error: Could not open /database.txt for writing.");
+        }
+      } else {
+        Serial.println("Local ACL is up to date (Version " + String(currentAclVersion) + ").");
+      }
+    } else {
+      Serial.println("Failed to parse ACL JSON payload.");
+    }
+  }
 }
-
 
 // --- 8. FREERTOS CORE 0 NETWORK TASK ---
 
@@ -298,6 +339,7 @@ void networkTaskCode(void * pvParameters) {
           Serial.println("MQTT connected!");
           mqtt.publish(topic_status, "online", true); 
           mqtt.subscribe(topic_event_ack); // Subscribe to the ACK topic
+          mqtt.subscribe("pdks/merkez/cfg/acl");
         }
       } else {
         mqtt.loop(); // Must be called frequently to process incoming ACKs
@@ -362,6 +404,7 @@ void setup() {
   readPointer = preferences.getInt("readPtr", 0);
   writePointer = preferences.getInt("writePtr", 0);
   globalSequence = preferences.getUInt("seq", 0);
+  currentAclVersion = preferences.getInt("acl_ver", 0);
   
   Serial1.begin(9600, SERIAL_8N1, SCANNER_RX_PIN, SCANNER_TX_PIN);
 
