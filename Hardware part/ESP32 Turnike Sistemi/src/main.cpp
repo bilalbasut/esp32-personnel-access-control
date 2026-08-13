@@ -9,9 +9,8 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 
-// ==============================================================================
+
 // --- 1. PROJECT DATA STRUCTURES ---
-// ==============================================================================
 // #pragma pack ensures the compiler uses exactly 32 bytes with no padding
 #pragma pack(push, 1) 
 struct AccessRecord {
@@ -29,9 +28,9 @@ struct AccessRecord {
 };
 #pragma pack(pop)
 
-// ==============================================================================
+
 // --- 2. GLOBAL VARIABLES & NVS POINTERS ---
-// ==============================================================================
+
 Preferences preferences;
 int readPointer = 0;         // Tracks which log needs to be sent next
 int writePointer = 0;        // Tracks where the next scanned card should be saved
@@ -51,7 +50,7 @@ const int MAX_LOGS = 500;    // Maximum offline capacity before overwriting old 
 #define W5500_CS_PIN    5
 #define W5500_RST_PIN   4
 
-RTC_DS3231 rtc;
+RTC_PCF8563 rtc;
 // --- FreeRTOS Task Handle ---
 TaskHandle_t NetworkTask;
 
@@ -70,9 +69,8 @@ bool hasDoorOpened = false;
 String lastScannedUID = "";
 unsigned long lastScanTime = 0;
 
-// ==============================================================================
 // --- 3. NETWORK & MQTT CONFIGURATION ---
-// ==============================================================================
+
 byte mac[] = { 0x00, 0x1A, 0x2B, 0x3C, 0x4D, 0x5E };
 IPAddress mqttServer(192, 168, 1, 100); 
 
@@ -85,9 +83,8 @@ const char* topic_event_ack = "pdks/merkez/dev/GATE-K3-01/event/ack";
 const char* topic_status = "pdks/merkez/dev/GATE-K3-01/status";
 const char* topic_hb = "pdks/merkez/dev/GATE-K3-01/hb";
 
-// ==============================================================================
+
 // --- 4. HELPER FUNCTIONS ---
-// ==============================================================================
 // Converts incoming ASCII Hex from the UART scanner into raw binary bytes
 void stringToBytes(String hexString, uint8_t* byteArray, uint8_t maxLen) {
   int len = hexString.length();
@@ -97,9 +94,9 @@ void stringToBytes(String hexString, uint8_t* byteArray, uint8_t maxLen) {
   }
 }
 
-// ==============================================================================
+
 // --- 5. HARDWARE CONTROL (NON-BLOCKING) ---
-// ==============================================================================
+
 void grantAccess() {
   isDenySequenceActive = false; 
   digitalWrite(RED_LED_PIN, LOW);
@@ -161,9 +158,9 @@ void handleHardwareTimers() {
   }
 }
 
-// ==============================================================================
+
 // --- 6. DATABASE & LOGGING ---
-// ==============================================================================
+
 bool isCardAuthorized(String scannedUID) {
   scannedUID.trim(); 
   File file = LittleFS.open("/database.txt", FILE_READ);
@@ -252,9 +249,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 }
 
-// ==============================================================================
+
 // --- 8. FREERTOS CORE 0 NETWORK TASK ---
-// ==============================================================================
+
 void networkTaskCode(void * pvParameters) {
   pinMode(W5500_RST_PIN, OUTPUT);
   digitalWrite(W5500_RST_PIN, LOW);
@@ -318,9 +315,9 @@ void networkTaskCode(void * pvParameters) {
   }
 }
 
-// ==============================================================================
+
 // --- 9. SETUP & INITIALIZATION ---
-// ==============================================================================
+
 void initFileSystem() {
   if (!LittleFS.begin(true)) return;
   if (!LittleFS.exists("/database.txt")) {
@@ -352,15 +349,22 @@ void setup() {
   pinMode(EXIT_BUTTON_PIN, INPUT);
   pinMode(DOOR_SENSOR_PIN, INPUT);
 
-  if (!rtc.begin()) while (1); 
-  if (rtc.lostPower()) rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  if (!rtc.begin()) {
+    Serial.println("CRITICAL ERROR: Couldn't find PCF8563! Check wiring.");
+    while (1); 
+  }
+
+  if (rtc.lostPower()) {
+    Serial.println("RTC lost power! Resetting time...");
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
 
   xTaskCreatePinnedToCore(networkTaskCode, "NetworkTask", 10000, NULL, 1, &NetworkTask, 0);
 }
 
-// ==============================================================================
+
 // --- 10. MAIN HARDWARE LOOP (CORE 1) ---
-// ==============================================================================
+
 void loop() {
   handleHardwareTimers(); 
 
