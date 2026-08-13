@@ -66,7 +66,7 @@ int denyBeepCount = 0;
 bool denyLedState = false;
 bool hasDoorOpened = false;
 
-// --- FR-04 Debounce Tracking ---
+// --- Debounce Tracking ---
 String lastScannedUID = "";
 unsigned long lastScanTime = 0;
 
@@ -220,7 +220,7 @@ void logAccess(DateTime now, String scannedUID, uint8_t resultCode) {
 }
 
 
-// --- 7. MQTT CALLBACK (FR-08 & FR-09 COMPLIANCE) ---
+// --- 7. MQTT CALLBACK ---
 // This function fires automatically when the server sends a message to the ESP32
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   // Convert incoming payload to a String
@@ -229,7 +229,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     message += (char)payload[i];
   }
   
-  // --- FR-08: Handle ACKs from the server ---
+  // --- Handle ACKs from the server ---
   if (String(topic) == topic_event_ack) {
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, message);
@@ -245,7 +245,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         logFile.read((uint8_t*)&record, sizeof(AccessRecord));
         logFile.close();
         
-        // CRITICAL FR-08 LOGIC: Only advance the pointer if the server explicitly ACKs this exact sequence
+        // Only advance the pointer if the server explicitly ACKs this exact sequence
         if (record.seq == ack_seq) {
           Serial.println("ACK Received for Seq: " + String(ack_seq) + ". Advancing pointer.");
           readPointer++;
@@ -256,7 +256,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
   }
   
-  // --- FR-09: Handle Remote ACL Updates ---
+  // --- Handle Remote ACL Updates ---
   else if (String(topic) == "pdks/merkez/cfg/acl") {
     JsonDocument doc;
     DeserializationError error = deserializeJson(doc, message);
@@ -317,12 +317,15 @@ void networkTaskCode(void * pvParameters) {
 
   unsigned long lastHeartbeat = 0;
 
+  int backoffTimer = 1000; // Start with a 1-second delay
+  unsigned long lastReconnectAttempt = 0;
+
   for(;;) {
     Ethernet.maintain(); 
     
     if (Ethernet.linkStatus() == LinkON) {
       
-      // --- FR-10: NTP Time Synchronization ---
+      // --- NTP Time Synchronization ---
       timeClient.update();
       
       // Sync the RTC with NTP once every hour (3,600,000 ms) or if it's our first time booting
@@ -333,18 +336,33 @@ void networkTaskCode(void * pvParameters) {
         lastNtpSync = millis();
         Serial.println("System Clock aligned with NTP (UTC). RTC Updated.");
       }
+      // --- MQTT CONNECTION & EXPONENTIAL BACKOFF ---
       if (!mqtt.connected()) {
-        Serial.println("Attempting MQTT connection...");
-        if (mqtt.connect(mqtt_client_id, NULL, NULL, topic_status, 1, true, "offline")) {
-          Serial.println("MQTT connected!");
-          mqtt.publish(topic_status, "online", true); 
-          mqtt.subscribe(topic_event_ack); // Subscribe to the ACK topic
-          mqtt.subscribe("pdks/merkez/cfg/acl");
+        if (millis() - lastReconnectAttempt > backoffTimer) {
+          Serial.print("Attempting MQTT connection... Backoff: ");
+          Serial.println(backoffTimer);
+          
+          if (mqtt.connect(mqtt_client_id, NULL, NULL, topic_status, 1, true, "offline")) {
+            Serial.println("MQTT connected!");
+            mqtt.publish(topic_status, "online", true); 
+            mqtt.subscribe(topic_event_ack); 
+            mqtt.subscribe("pdks/merkez/cfg/acl");
+            
+            backoffTimer = 1000; // Reset the backoff on success
+          } else {
+            // Exponential backoff: double the timer, cap at 60 seconds
+            backoffTimer *= 2;
+            if (backoffTimer > 60000) backoffTimer = 60000;
+          }
+          lastReconnectAttempt = millis();
         }
-      } else {
-        mqtt.loop(); // Must be called frequently to process incoming ACKs
+      } 
+      // --- IF CONNECTED, PROCESS INCOMING DATA & PUBLISH ---
+      else {
         
-        // FR-11: 30 Second Heartbeat
+        mqtt.loop();
+
+        // 30 Second Heartbeat
         if (millis() - lastHeartbeat > 30000) {
           mqtt.publish(topic_hb, "{\"uptime\": true}");
           lastHeartbeat = millis();
@@ -364,11 +382,8 @@ void networkTaskCode(void * pvParameters) {
             sprintf(payload, "{\"seq\":%lu,\"uid\":\"%s\",\"ts\":%lu,\"res\":%d}", 
                     record.seq, lastScannedUID.c_str(), record.ts, record.result);
             
-            // Send the log. We DO NOT advance the pointer here anymore. 
-            // The mqttCallback function will handle it when the server replies.
             mqtt.publish(topic_event, payload);
           } else {
-             // File missing error handling
              readPointer++;
              if(readPointer >= MAX_LOGS) readPointer = 0;
              preferences.putInt("readPtr", readPointer);
@@ -465,7 +480,7 @@ void loop() {
     scannedUID.trim();
     unsigned long currentMillis = millis();
 
-    // FR-04: 5-Second Debounce Logic
+    // 5-Second Debounce Logic
     if (scannedUID == lastScannedUID && (currentMillis - lastScanTime < 5000)) {
       Serial.println("Debounce: Ignored duplicate scan.");
     } else {
