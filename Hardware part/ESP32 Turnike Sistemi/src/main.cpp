@@ -5,157 +5,257 @@
 #include <LittleFS.h>
 #include <SPI.h>
 #include <Ethernet.h>
-#include <ArduinoHttpClient.h>
+#include <PubSubClient.h>
 #include <Preferences.h>
+#include <ArduinoJson.h>
 
+// ==============================================================================
+// --- 1. PROJECT DATA STRUCTURES ---
+// ==============================================================================
+// #pragma pack ensures the compiler uses exactly 32 bytes with no padding
+#pragma pack(push, 1) 
+struct AccessRecord {
+  uint32_t seq;         // Sequence number (increments forever)
+  uint32_t ts;          // Unix timestamp
+  uint8_t uid[7];       // Card UID (raw bytes)
+  uint8_t uidLen;       // Length of UID
+  uint8_t dir;          // 0=in, 1=out
+  uint8_t result;       // 0=granted, 1=unknown, 2=expired, 3=schedule, 4=manual
+  uint8_t mode;         // 0=online, 1=offline
+  uint8_t tsrc;         // 0=ntp, 1=rtc, 2=invalid
+  uint8_t floor;        // Floor/door number
+  uint8_t reserved[9];  // Padding to hit exactly 32 bytes
+  uint16_t crc16;       // Integrity check
+};
+#pragma pack(pop)
+
+// ==============================================================================
+// --- 2. GLOBAL VARIABLES & NVS POINTERS ---
+// ==============================================================================
 Preferences preferences;
-int readPointer = 0;  // Where the network task is currently reading/uploading
-int writePointer = 0; // Where the RFID task is currently saving new logs
+int readPointer = 0;         // Tracks which log needs to be sent next
+int writePointer = 0;        // Tracks where the next scanned card should be saved
+uint32_t globalSequence = 0; // Lifetime scan counter for deduplication
 
-const int MAX_LOGS = 500; // Maximum offline logs before overwriting
+const int MAX_LOGS = 500;    // Maximum offline capacity before overwriting old logs
 
-// --- 1. Hardware Pins ---
-// Outputs
+// --- Hardware Pins ---
 #define RELAY_PIN       32
 #define BUZZER_PIN      33
 #define GREEN_LED_PIN   25
 #define RED_LED_PIN     17
-
-// Inputs (Restored)
 #define EXIT_BUTTON_PIN 35
 #define DOOR_SENSOR_PIN 34
-
-// UART Scanner
 #define SCANNER_RX_PIN  27
 #define SCANNER_TX_PIN  26
+#define W5500_CS_PIN    5
+#define W5500_RST_PIN   4
 
-// --- W5500 Pins ---
-#define W5500_CS_PIN  5
-#define W5500_RST_PIN 4
-
-// --- 2. RTC Object ---
 RTC_DS3231 rtc;
+// --- FreeRTOS Task Handle ---
+TaskHandle_t NetworkTask;
 
-// --- 3. Non-Blocking Timer Variables ---
-// Relay & Success Beep Timers
+// --- State Machine Timers ---
 unsigned long relayStartTime = 0;
 bool isRelayActive = false;
-
 unsigned long successBeepStartTime = 0;
 bool isSuccessBeepActive = false;
-
-// Deny Sequence Timers
 bool isDenySequenceActive = false;
 unsigned long lastDenyStepTime = 0;
 int denyBeepCount = 0;
 bool denyLedState = false;
 bool hasDoorOpened = false;
-// --- 4. Hardware Control Functions ---
+
+// --- FR-04 Debounce Tracking ---
+String lastScannedUID = "";
+unsigned long lastScanTime = 0;
+
+// ==============================================================================
+// --- 3. NETWORK & MQTT CONFIGURATION ---
+// ==============================================================================
+byte mac[] = { 0x00, 0x1A, 0x2B, 0x3C, 0x4D, 0x5E };
+IPAddress mqttServer(192, 168, 1, 100); 
+
+EthernetClient ethClient;
+PubSubClient mqtt(ethClient);
+
+const char* mqtt_client_id = "GATE-K3-01";
+const char* topic_event = "pdks/merkez/dev/GATE-K3-01/event";
+const char* topic_event_ack = "pdks/merkez/dev/GATE-K3-01/event/ack";
+const char* topic_status = "pdks/merkez/dev/GATE-K3-01/status";
+const char* topic_hb = "pdks/merkez/dev/GATE-K3-01/hb";
+
+// ==============================================================================
+// --- 4. HELPER FUNCTIONS ---
+// ==============================================================================
+// Converts incoming ASCII Hex from the UART scanner into raw binary bytes
+void stringToBytes(String hexString, uint8_t* byteArray, uint8_t maxLen) {
+  int len = hexString.length();
+  for (int i = 0; i < len && i / 2 < maxLen; i += 2) {
+    String byteString = hexString.substring(i, i + 2);
+    byteArray[i / 2] = (uint8_t) strtol(byteString.c_str(), NULL, 16);
+  }
+}
+
+// ==============================================================================
+// --- 5. HARDWARE CONTROL (NON-BLOCKING) ---
+// ==============================================================================
 void grantAccess() {
-  // Cancel any active deny sequence to prevent LED conflicts
   isDenySequenceActive = false; 
   digitalWrite(RED_LED_PIN, LOW);
   hasDoorOpened = false;
-
-  // Start the 3-second relay timer
+  
   isRelayActive = true;
   relayStartTime = millis();
   digitalWrite(GREEN_LED_PIN, HIGH);
   digitalWrite(RELAY_PIN, HIGH); 
   
-  // Start the 250ms buzzer timer
   isSuccessBeepActive = true;
   successBeepStartTime = millis();
   digitalWrite(BUZZER_PIN, HIGH);
 }
 
 void denyAccess() {
-  // If the door is already unlocked, ignore the deny beep so it doesn't lock people out
-  if (isRelayActive) return; 
-
-  // Start the deny sequence state machine
+  if (isRelayActive) return; // Don't override an active unlock
   isDenySequenceActive = true;
   denyBeepCount = 0;
-  denyLedState = true; // Start with LEDs ON
+  denyLedState = true; 
   lastDenyStepTime = millis();
-  
   digitalWrite(RED_LED_PIN, HIGH);
   digitalWrite(BUZZER_PIN, HIGH);
 }
 
+// State machine processor called every loop cycle
+void handleHardwareTimers() {
+  unsigned long currentMillis = millis();
+  
+  if (isRelayActive && (currentMillis - relayStartTime >= 3000)) {
+    isRelayActive = false;
+    digitalWrite(GREEN_LED_PIN, LOW);
+    digitalWrite(RELAY_PIN, LOW);
+  }
+  
+  if (isSuccessBeepActive && (currentMillis - successBeepStartTime >= 250)) {
+    isSuccessBeepActive = false;
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+  
+  if (isDenySequenceActive) {
+    if (currentMillis - lastDenyStepTime >= 150) {
+      lastDenyStepTime = currentMillis; 
+      if (denyLedState) {
+        digitalWrite(RED_LED_PIN, LOW);
+        digitalWrite(BUZZER_PIN, LOW);
+        denyLedState = false;
+        denyBeepCount++; 
+      } else {
+        if (denyBeepCount < 3) {
+          digitalWrite(RED_LED_PIN, HIGH);
+          digitalWrite(BUZZER_PIN, HIGH);
+          denyLedState = true;
+        } else {
+          isDenySequenceActive = false;
+        }
+      }
+    }
+  }
+}
+
+// ==============================================================================
+// --- 6. DATABASE & LOGGING ---
+// ==============================================================================
 bool isCardAuthorized(String scannedUID) {
   scannedUID.trim(); 
-  
-  // Open the file in READ mode
   File file = LittleFS.open("/database.txt", FILE_READ);
-  if (!file) {
-    Serial.println("Error: Could not read database file.");
-    return false; 
-  }
+  if (!file) return false; 
 
-  // Loop through every line in the text file
   while (file.available()) {
     String line = file.readStringUntil('\n');
-    line.trim(); // Strip hidden carriage returns from the text file
-    
+    line.trim(); 
     if (line == scannedUID) {
-      file.close(); // Always close the file to free up memory
+      file.close(); 
       return true;
     }
   }
-  
   file.close(); 
   return false;
 }
 
-void logAccess(String timestamp, String scannedUID, bool isGranted) {
-  String accessStatus = isGranted ? "GRANTED" : "DENIED";
-  String logEntry = timestamp + "," + scannedUID + "," + accessStatus;
+// Creates the 32-byte binary record and saves it to LittleFS
+void logAccess(DateTime now, String scannedUID, uint8_t resultCode) {
+  AccessRecord record = {0}; 
   
-  // Create a specific filename based on the current write pointer
-  String filename = "/log_" + String(writePointer) + ".txt";
-  
-  // Overwrite whatever was in that specific file slot
+  globalSequence++;
+  preferences.putUInt("seq", globalSequence);
+
+  record.seq = globalSequence;
+  record.ts = now.unixtime();
+  record.uidLen = scannedUID.length() / 2; 
+  stringToBytes(scannedUID, record.uid, 7); 
+  record.dir = 0; 
+  record.result = resultCode; 
+  record.mode = (mqtt.connected()) ? 0 : 1; 
+  record.tsrc = 1; // 1=rtc (Placeholder until NTP is implemented)
+  record.floor = 3; 
+  record.crc16 = 0xFFFF; // Placeholder
+
+  String filename = "/log_" + String(writePointer) + ".bin";
   File logFile = LittleFS.open(filename, FILE_WRITE);
   if (logFile) {
-    logFile.print(logEntry);
+    logFile.write((uint8_t*)&record, sizeof(AccessRecord));
     logFile.close();
   }
   
-  Serial.println("Saved to slot " + String(writePointer) + " -> " + logEntry);
+  Serial.println("Saved bin record to slot " + String(writePointer));
   
-  // Advance the write pointer, and loop back to 0 if we hit the limit
   writePointer++;
-  if (writePointer >= MAX_LOGS) {
-    writePointer = 0;
-  }
-  
-  // Save the new position to NVS immediately
+  if (writePointer >= MAX_LOGS) writePointer = 0;
   preferences.putInt("writePtr", writePointer);
 }
 
-// Define a MAC address for the ESP32  ---> MUST CHANGE THESE BEFORE DEPLOYMENT <---
-byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
+// ==============================================================================
+// --- 7. MQTT CALLBACK (FR-08 COMPLIANCE) ---
+// ==============================================================================
+// This function fires automatically when the server sends a message to the ESP32
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  // Convert incoming payload to a String
+  String message = "";
+  for (unsigned int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  
+  // If the message is an ACK from the server
+  if (String(topic) == topic_event_ack) {
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, message);
+    
+    if (!error) {
+      uint32_t ack_seq = doc["ack_seq"]; // Parse the sequence number
+      
+      // Load the current log waiting in the queue to verify the sequence matches
+      String filename = "/log_" + String(readPointer) + ".bin";
+      if (LittleFS.exists(filename)) {
+        File logFile = LittleFS.open(filename, FILE_READ);
+        AccessRecord record;
+        logFile.read((uint8_t*)&record, sizeof(AccessRecord));
+        logFile.close();
+        
+        // CRITICAL FR-08 LOGIC: Only advance the pointer if the server explicitly ACKs this exact sequence
+        if (record.seq == ack_seq) {
+          Serial.println("ACK Received for Seq: " + String(ack_seq) + ". Advancing pointer.");
+          readPointer++;
+          if (readPointer >= MAX_LOGS) readPointer = 0;
+          preferences.putInt("readPtr", readPointer);
+        }
+      }
+    }
+  }
+}
 
-char serverAddress[] = "192.168.1.100";  // Your server IP address
-int port = 8080;                         // Server port
-String apiPath = "/api/access-logs";     // API endpoint
-
-EthernetClient ethClient;
-HttpClient http = HttpClient(ethClient, serverAddress, port);
-
-// --- RAM Tracker for Flash Wear Prevention ---
-size_t lastSyncedPosition = 0;
-
-// Define a FreeRTOS Task Handle
-TaskHandle_t NetworkTask;
-
-// --- The Core 0 Network Function ---
-// Everything inside this function runs entirely on Core 0 in the background.
+// ==============================================================================
+// --- 8. FREERTOS CORE 0 NETWORK TASK ---
+// ==============================================================================
 void networkTaskCode(void * pvParameters) {
-  Serial.print("Network Task running on Core: ");
-  Serial.println(xPortGetCoreID());
-
   pinMode(W5500_RST_PIN, OUTPUT);
   digitalWrite(W5500_RST_PIN, LOW);
   delay(100);
@@ -163,287 +263,154 @@ void networkTaskCode(void * pvParameters) {
   delay(500);
   
   Ethernet.init(W5500_CS_PIN);
+  mqtt.setServer(mqttServer, 1883); 
+  mqtt.setCallback(mqttCallback); // Attach the listener function
   
-  if (Ethernet.begin(mac) == 0) {
-    Serial.println("Failed to configure Ethernet using DHCP");
-  } else {
-    Serial.print("Ethernet connected! IP Address: ");
-    Serial.println(Ethernet.localIP());
-  }
+  unsigned long lastHeartbeat = 0;
 
   for(;;) {
     Ethernet.maintain(); 
     
     if (Ethernet.linkStatus() == LinkON) {
-      
-      // As long as the read pointer hasn't caught up to the write pointer
-      while (readPointer != writePointer) {
-        
-        String filename = "/log_" + String(readPointer) + ".txt";
-        
-        if (LittleFS.exists(filename)) {
-          File logFile = LittleFS.open(filename, FILE_READ);
-          String logLine = logFile.readString();
-          logFile.close();
-          
-          if (logLine.length() > 0) {
-            String postData = "{\"log\":\"" + logLine + "\"}";
-            
-            http.beginRequest();
-            http.post(apiPath);
-            http.sendHeader("Content-Type", "application/json");
-            http.sendHeader("Content-Length", postData.length());
-            http.beginBody();
-            http.print(postData);
-            http.endRequest();
-
-            int statusCode = http.responseStatusCode();
-            
-            // Wait for EXPLICIT server confirmation before moving the pointer
-            if (statusCode == 200 || statusCode == 201) {
-              Serial.println("SERVER CONFIRMED SLOT " + String(readPointer) + ": " + logLine);
-              
-              // Advance the read pointer
-              readPointer++;
-              if (readPointer >= MAX_LOGS) {
-                readPointer = 0;
-              }
-              
-              // Save the confirmed state to NVS
-              preferences.putInt("readPtr", readPointer);
-              
-            } else {
-              Serial.println("SERVER REJECTED/FAILED. Halting queue.");
-              break; // Stop trying; we cannot advance the pointer without a 200 OK
-            }
-          }
-        } else {
-           // File doesn't exist for some reason, skip this pointer to unblock the queue
-           readPointer++;
-           if(readPointer >= MAX_LOGS) readPointer = 0;
-           preferences.putInt("readPtr", readPointer);
+      if (!mqtt.connected()) {
+        Serial.println("Attempting MQTT connection...");
+        if (mqtt.connect(mqtt_client_id, NULL, NULL, topic_status, 1, true, "offline")) {
+          Serial.println("MQTT connected!");
+          mqtt.publish(topic_status, "online", true); 
+          mqtt.subscribe(topic_event_ack); // Subscribe to the ACK topic
         }
-      }
-    }
-
-    // Task sleeps for 5 seconds
-    vTaskDelay(5000 / portTICK_PERIOD_MS); 
-  }
-}
-
-void handleHardwareTimers() {
-  unsigned long currentMillis = millis();
-
-  // 1. Check Relay Timer (3000ms / 3 seconds)
-  if (isRelayActive && (currentMillis - relayStartTime >= 3000)) {
-    isRelayActive = false;
-    digitalWrite(GREEN_LED_PIN, LOW);
-    digitalWrite(RELAY_PIN, LOW);
-  }
-
-  // 2. Check Success Beep Timer (250ms)
-  if (isSuccessBeepActive && (currentMillis - successBeepStartTime >= 250)) {
-    isSuccessBeepActive = false;
-    digitalWrite(BUZZER_PIN, LOW);
-  }
-
-  // 3. Check Deny Sequence Timer (Rapid 150ms toggles)
-  if (isDenySequenceActive) {
-    if (currentMillis - lastDenyStepTime >= 150) {
-      lastDenyStepTime = currentMillis; // Reset the stopwatch for the next toggle
-      
-      if (denyLedState) {
-        // Hardware was ON, turn it OFF
-        digitalWrite(RED_LED_PIN, LOW);
-        digitalWrite(BUZZER_PIN, LOW);
-        denyLedState = false;
-        denyBeepCount++; // Count one full beep
       } else {
-        // Hardware was OFF, check if we need another beep
-        if (denyBeepCount < 3) {
-          digitalWrite(RED_LED_PIN, HIGH);
-          digitalWrite(BUZZER_PIN, HIGH);
-          denyLedState = true;
-        } else {
-          // 3 beeps completed, end the sequence
-          isDenySequenceActive = false;
+        mqtt.loop(); // Must be called frequently to process incoming ACKs
+        
+        // FR-11: 30 Second Heartbeat
+        if (millis() - lastHeartbeat > 30000) {
+          mqtt.publish(topic_hb, "{\"uptime\": true}");
+          lastHeartbeat = millis();
+        }
+
+        // Process Offline Queue
+        if (readPointer != writePointer) {
+          String filename = "/log_" + String(readPointer) + ".bin";
+          
+          if (LittleFS.exists(filename)) {
+            File logFile = LittleFS.open(filename, FILE_READ);
+            AccessRecord record;
+            logFile.read((uint8_t*)&record, sizeof(AccessRecord));
+            logFile.close();
+            
+            char payload[150];
+            sprintf(payload, "{\"seq\":%lu,\"uid\":\"%s\",\"ts\":%lu,\"res\":%d}", 
+                    record.seq, lastScannedUID.c_str(), record.ts, record.result);
+            
+            // Send the log. We DO NOT advance the pointer here anymore. 
+            // The mqttCallback function will handle it when the server replies.
+            mqtt.publish(topic_event, payload);
+          } else {
+             // File missing error handling
+             readPointer++;
+             if(readPointer >= MAX_LOGS) readPointer = 0;
+             preferences.putInt("readPtr", readPointer);
+          }
         }
       }
     }
+    vTaskDelay(100 / portTICK_PERIOD_MS); 
   }
 }
-// --- 6. File System Initialization ---
+
+// ==============================================================================
+// --- 9. SETUP & INITIALIZATION ---
+// ==============================================================================
 void initFileSystem() {
-  // The 'true' parameter enables auto-formatting on the very first boot
-  if (!LittleFS.begin(true)) {
-    Serial.println("CRITICAL ERROR: Failed to mount LittleFS!");
-    return;
-  }
-  Serial.println("LittleFS mounted successfully.");
-
-  // Check if our database file exists
+  if (!LittleFS.begin(true)) return;
   if (!LittleFS.exists("/database.txt")) {
-    Serial.println("No database found. Creating default /database.txt...");
-    
-    // Open the file in WRITE mode
     File file = LittleFS.open("/database.txt", FILE_WRITE);
-    if (!file) {
-      Serial.println("Error: Could not create database file.");
-      return;
+    if (file) {
+      file.println("04A2B3C1D5E680"); // Example valid hex
+      file.close();
     }
-    
-    // Write your starter UIDs to the file ---> MUST CHANGE THESE BEFORE DEPLOYMENT <---
-    file.println("A1B2C3D4");
-    file.println("98765432");
-    file.close();
-    
-    Serial.println("Default database created.");
-  } else {
-    Serial.println("Existing /database.txt loaded.");
   }
 }
 
-
-// --- 4. System Setup ---
 void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  // Initialize the File System first
   initFileSystem();
-
-  // Initialize NVS
   preferences.begin("access_system", false); 
   
-  // Retrieve the pointers. If they don't exist yet, default to 0.
   readPointer = preferences.getInt("readPtr", 0);
   writePointer = preferences.getInt("writePtr", 0);
+  globalSequence = preferences.getUInt("seq", 0);
   
-  Serial.print("Booted. Read Pointer: ");
-  Serial.print(readPointer);
-  Serial.print(" | Write Pointer: ");
-  Serial.println(writePointer);
-
-  // Initialize Scanner on Serial1
   Serial1.begin(9600, SERIAL_8N1, SCANNER_RX_PIN, SCANNER_TX_PIN);
 
-  // Initialize Outputs
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(GREEN_LED_PIN, OUTPUT);
   pinMode(RED_LED_PIN, OUTPUT);
-  
-  digitalWrite(RELAY_PIN, LOW);
-  digitalWrite(BUZZER_PIN, LOW);
-  digitalWrite(GREEN_LED_PIN, LOW);
-  digitalWrite(RED_LED_PIN, LOW);
-
-  // Initialize Inputs (Restored)
   pinMode(EXIT_BUTTON_PIN, INPUT);
   pinMode(DOOR_SENSOR_PIN, INPUT);
 
-  // Initialize RTC
-  if (!rtc.begin()) {
-    Serial.println("CRITICAL ERROR: Couldn't find RTC! Check wiring.");
-    while (1); 
-  }
+  if (!rtc.begin()) while (1); 
+  if (rtc.lostPower()) rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
 
-  if (rtc.lostPower()) {
-    Serial.println("RTC lost power! Resetting time...");
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-  }
-
-  Serial.println("System Ready. Waiting for card scan...");
-
-  // Launch the Network Task on Core 0
-  // Parameters: Function Name, Task Name, Stack Size, Task Input, Priority, Handle, Core ID
-  xTaskCreatePinnedToCore(
-    networkTaskCode,   
-    "NetworkTask",     
-    10000,            
-    NULL,              
-    1,                 
-    &NetworkTask,      
-    0                  
-  );
-  
-  // By default, your standard setup() and loop() are already running on Core 1.
-  Serial.print("Main hardware loop running on Core: ");
-  Serial.println(xPortGetCoreID());
+  xTaskCreatePinnedToCore(networkTaskCode, "NetworkTask", 10000, NULL, 1, &NetworkTask, 0);
 }
 
-// --- 5. Main Loop ---
-
+// ==============================================================================
+// --- 10. MAIN HARDWARE LOOP (CORE 1) ---
+// ==============================================================================
 void loop() {
-
   handleHardwareTimers(); 
 
-  // --- 1. Exit Button Logic ---
-  // If the button is pressed (LOW) and the door isn't already unlocked
+  // Exit Button Trigger
   if (digitalRead(EXIT_BUTTON_PIN) == LOW && !isRelayActive) {
-    Serial.println("Exit Button Pressed -> GRANTED");
+    DateTime now = rtc.now();
+    // BUG FIX: Use a dummy valid hex string instead of "MANUAL"
+    logAccess(now, "00000000000000", 4); 
     grantAccess();
   }
 
-  // --- 2. Smart Auto-Relock (Anti-Tailgating) Logic ---
+  // Anti-Tailgating Sensor
   if (isRelayActive) {
     bool currentDoorState = digitalRead(DOOR_SENSOR_PIN);
-    
-    // Detect if the door has been pushed open
-    if (currentDoorState == HIGH) {
-      hasDoorOpened = true; 
-    }
-    
-    // If the door was opened, and is now closed again, kill the 3-second timer early
+    if (currentDoorState == HIGH) hasDoorOpened = true; 
     if (hasDoorOpened && currentDoorState == LOW) {
       isRelayActive = false;
       digitalWrite(GREEN_LED_PIN, LOW);
       digitalWrite(RELAY_PIN, LOW);
-      Serial.println("Door securely closed. Timer overridden, relocked early.");
-      
-      // Reset so it doesn't trigger repeatedly
       hasDoorOpened = false; 
     }
   }
 
-  // --- 3. UART Scanner Logic ---
+  // UART Scanner Reading
   if (Serial1.available() > 0) {
     String scannedUID = "";
-    
     while (Serial1.available() > 0) {
       char incomingByte = Serial1.read(); 
       scannedUID += incomingByte;
       delay(2); 
     }
-    
     scannedUID.trim();
+    unsigned long currentMillis = millis();
 
-    DateTime now = rtc.now();
-    char timestamp[25];
-    sprintf(timestamp, "%04d/%02d/%02d %02d:%02d:%02d", 
-            now.year(), now.month(), now.day(), 
-            now.hour(), now.minute(), now.second());
-
-    Serial.print("[");
-    Serial.print(timestamp);
-    Serial.print("] UID: ");
-    Serial.print(scannedUID);
-    
-    // Check the database and fire the hardware
-    if (isCardAuthorized(scannedUID)) {
-      Serial.println(" -> GRANTED");
-      
-      // Save to flash drive (true = Granted)
-      logAccess(String(timestamp), scannedUID, true);
-      
-      grantAccess(); 
+    // FR-04: 5-Second Debounce Logic
+    if (scannedUID == lastScannedUID && (currentMillis - lastScanTime < 5000)) {
+      Serial.println("Debounce: Ignored duplicate scan.");
     } else {
-      Serial.println(" -> DENIED");
+      lastScannedUID = scannedUID;
+      lastScanTime = currentMillis;
+
+      DateTime now = rtc.now();
       
-      // Save to flash drive (false = Denied)
-      logAccess(String(timestamp), scannedUID, false);
-      
-      denyAccess(); 
+      if (isCardAuthorized(scannedUID)) {
+        logAccess(now, scannedUID, 0); 
+        grantAccess(); 
+      } else {
+        logAccess(now, scannedUID, 1); 
+        denyAccess(); 
+      }
     }
   }
 }
