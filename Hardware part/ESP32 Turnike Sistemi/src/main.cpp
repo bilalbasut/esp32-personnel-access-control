@@ -8,7 +8,8 @@
 #include <PubSubClient.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
-
+#include <EthernetUdp.h>
+#include <NTPClient.h>
 
 // --- 1. PROJECT DATA STRUCTURES ---
 // #pragma pack ensures the compiler uses exactly 32 bytes with no padding
@@ -68,6 +69,14 @@ bool hasDoorOpened = false;
 // --- FR-04 Debounce Tracking ---
 String lastScannedUID = "";
 unsigned long lastScanTime = 0;
+
+// --- NTP & Time Tracking ---
+EthernetUDP ntpUDP;
+// NTP server, 0 second offset (Strict UTC requirement), update every 60 seconds
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000); 
+
+uint8_t currentTimeSource = 1; // Default to 1 (RTC)
+unsigned long lastNtpSync = 0;
 
 // --- 3. NETWORK & MQTT CONFIGURATION ---
 
@@ -192,8 +201,8 @@ void logAccess(DateTime now, String scannedUID, uint8_t resultCode) {
   record.dir = 0; 
   record.result = resultCode; 
   record.mode = (mqtt.connected()) ? 0 : 1; 
-  record.tsrc = 1; // 1=rtc (Placeholder until NTP is implemented)
-  record.floor = 3; 
+  record.tsrc = currentTimeSource; // Dynamically logs 0 (NTP), 1 (RTC), or 2 (Invalid)
+  record.floor = 3;
   record.crc16 = 0xFFFF; // Placeholder
 
   String filename = "/log_" + String(writePointer) + ".bin";
@@ -210,9 +219,9 @@ void logAccess(DateTime now, String scannedUID, uint8_t resultCode) {
   preferences.putInt("writePtr", writePointer);
 }
 
-// ==============================================================================
+
 // --- 7. MQTT CALLBACK (FR-08 COMPLIANCE) ---
-// ==============================================================================
+
 // This function fires automatically when the server sends a message to the ESP32
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   // Convert incoming payload to a String
@@ -263,12 +272,26 @@ void networkTaskCode(void * pvParameters) {
   mqtt.setServer(mqttServer, 1883); 
   mqtt.setCallback(mqttCallback); // Attach the listener function
   
+  timeClient.begin();
+
   unsigned long lastHeartbeat = 0;
 
   for(;;) {
     Ethernet.maintain(); 
     
     if (Ethernet.linkStatus() == LinkON) {
+      
+      // --- FR-10: NTP Time Synchronization ---
+      timeClient.update();
+      
+      // Sync the RTC with NTP once every hour (3,600,000 ms) or if it's our first time booting
+      if (timeClient.isTimeSet() && (millis() - lastNtpSync > 3600000 || lastNtpSync == 0)) {
+        // Adjust the PCF8563 with the precise UTC epoch time
+        rtc.adjust(DateTime(timeClient.getEpochTime()));
+        currentTimeSource = 0; // Upgrade status to 0 (NTP Synchronized)
+        lastNtpSync = millis();
+        Serial.println("System Clock aligned with NTP (UTC). RTC Updated.");
+      }
       if (!mqtt.connected()) {
         Serial.println("Attempting MQTT connection...");
         if (mqtt.connect(mqtt_client_id, NULL, NULL, topic_status, 1, true, "offline")) {
@@ -349,14 +372,14 @@ void setup() {
   pinMode(EXIT_BUTTON_PIN, INPUT);
   pinMode(DOOR_SENSOR_PIN, INPUT);
 
-  if (!rtc.begin()) {
-    Serial.println("CRITICAL ERROR: Couldn't find PCF8563! Check wiring.");
-    while (1); 
-  }
-
+  if (!rtc.begin()) while (1); 
+  
   if (rtc.lostPower()) {
-    Serial.println("RTC lost power! Resetting time...");
+    Serial.println("RTC lost power! Setting compile time and flagging as INVALID.");
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    currentTimeSource = 2; // 2 = invalid
+  } else {
+    currentTimeSource = 1; // 1 = rtc (valid)
   }
 
   xTaskCreatePinnedToCore(networkTaskCode, "NetworkTask", 10000, NULL, 1, &NetworkTask, 0);
