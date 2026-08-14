@@ -10,6 +10,8 @@
 #include <ArduinoJson.h>
 #include <EthernetUdp.h>
 #include <NTPClient.h>
+#include <vector>
+#include <algorithm>
 
 // --- 1. PROJECT DATA STRUCTURES ---
 // #pragma pack ensures the compiler uses exactly 32 bytes with no padding
@@ -38,6 +40,9 @@ int writePointer = 0;        // Tracks where the next scanned card should be sav
 uint32_t globalSequence = 0; // Lifetime scan counter for deduplication
 int currentAclVersion = 0; // Tracks the local database version
 const int MAX_LOGS = 500;    // Maximum offline capacity before overwriting old logs
+
+// --- RAM Database Array ---
+std::vector<String> aclList;
 
 // --- Hardware Pins ---
 #define RELAY_PIN       32
@@ -170,21 +175,41 @@ void handleHardwareTimers() {
 
 // --- 6. DATABASE & LOGGING ---
 
-bool isCardAuthorized(String scannedUID) {
-  scannedUID.trim(); 
+void loadAclToRAM() {
+  aclList.clear(); // Empty the current array
+  
   File file = LittleFS.open("/database.txt", FILE_READ);
-  if (!file) return false; 
+  if (!file) {
+    Serial.println("Error: Could not read database file to RAM.");
+    return; 
+  }
 
   while (file.available()) {
     String line = file.readStringUntil('\n');
     line.trim(); 
-    if (line == scannedUID) {
-      file.close(); 
-      return true;
+    
+    // Normalize to uppercase hex to satisfy the flowchart constraint
+    line.toUpperCase(); 
+    
+    if (line.length() > 0) {
+      aclList.push_back(line); // Add to the RAM array
     }
   }
   file.close(); 
-  return false;
+  
+  // Mathematically sort the array lexicographically for Binary Search
+  std::sort(aclList.begin(), aclList.end());
+  
+  Serial.print("ACL successfully loaded to RAM. Total authorized cards: ");
+  Serial.println(aclList.size());
+}
+
+bool isCardAuthorized(String scannedUID) {
+  scannedUID.trim(); 
+  scannedUID.toUpperCase(); // Ensure incoming scan matches our normalized database
+  
+  // Execute a highly efficient Binary Search on the sorted RAM array
+  return std::binary_search(aclList.begin(), aclList.end(), scannedUID);
 }
 
 // Creates the 32-byte binary record and saves it to LittleFS
@@ -282,6 +307,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
           }
           
           dbFile.close();
+          
+          // --- REFRESH THE RAM ARRAY ---
+          loadAclToRAM();
           
           // Save the new version to RAM and NVS
           currentAclVersion = newVersion;
@@ -414,7 +442,8 @@ void setup() {
   delay(1000);
   
   initFileSystem();
-  preferences.begin("access_system", false); 
+  loadAclToRAM();
+  preferences.begin("access_system", false);
   
   readPointer = preferences.getInt("readPtr", 0);
   writePointer = preferences.getInt("writePtr", 0);
