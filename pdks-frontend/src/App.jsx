@@ -1,122 +1,129 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import './App.css'
+import { useState, useEffect } from 'react';
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [events, setEvents] = useState([]);
+  const [devices, setDevices] = useState([]);
+  const [formData, setFormData] = useState({
+    ad_soyad: '', departman: '', uid: '', floors: '1,2,3'
+  });
+
+  // Fetch data from your Node.js API
+  const fetchData = async () => {
+    try {
+      const eventRes = await fetch('/api/events');
+      setEvents(await eventRes.json());
+      
+      const devRes = await fetch('/api/devices');
+      setDevices(await devRes.json());
+    } catch (err) {
+      console.error("Failed to fetch data", err);
+    }
+  };
+
+  // Poll the API every 3 seconds to keep data live
+  useEffect(() => {
+    fetchData();
+    const interval = setInterval(fetchData, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Handle Form Submission
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    const payload = {
+      ...formData,
+      valid_from: Math.floor(Date.now() / 1000),
+      valid_to: Math.floor(Date.now() / 1000) + (31536000 * 5) // Valid for 5 years
+    };
+
+    const res = await fetch('/api/cards/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    if (res.ok) {
+      alert('Card Added and Hardware Synced!');
+      setFormData({ ad_soyad: '', departman: '', uid: '', floors: '1,2,3' });
+      fetchData(); // Immediately refresh the tables
+    }
+  };
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.jsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+    <div className="container mt-4"></div>
+      PDKS Admin Dashboard
+      
+        
+        {/* Add Card Form */}
+        
+          
+            Add New RFID Card
+            
+              
+                
+                  Employee Name
+                   setFormData({...formData, ad_soyad: e.target.value})} required />
+                
+                
+                  Department
+                   setFormData({...formData, departman: e.target.value})} required />
+                
+                
+                  RFID UID
+                   setFormData({...formData, uid: e.target.value})} required />
+                
+                Save & Sync to Hardware
+              
+            
+          
+        
 
-      <div className="ticks"></div>
+        {/* Data Tables */}
+        
+          
+            Device Fleet Status
+            
+                {devices.length === 0 ?  : null}
+                {devices.map(dev => (
+                  
+                ))}
+              
+              Device IDStatus
+              No devices found
+                    {dev.id}
+                    {dev.durum === 'online' ? '🟢 Online' : '🔴 Offline'}
+                  
+            
+          
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+          
+            Live Access Logs
+            
+              
+                  {events.length === 0 ?  : null}
+                  {events.map((ev, idx) => (
+                    
+                  ))}
+                
+                
+                  TimeEmployeeDeviceResult
+                
+                No logs yet
+                      {new Date(ev.ts_utc * 1000).toLocaleTimeString()}
+                      {ev.ad_soyad || 'Unknown'}
+                      {ev.device_id}
+                      
+                        {ev.result === 0 ? Granted : Denied}
+                      
+                    
+              
+            
+          
+        
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+      
+    
+  );
 }
 
-export default App
+export default App;
