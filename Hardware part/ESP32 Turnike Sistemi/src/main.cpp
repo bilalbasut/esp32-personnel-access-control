@@ -86,6 +86,17 @@ struct AccessRecord {
 };
 #pragma pack(pop)
 
+#pragma pack(push, 1)
+struct AclRecord {
+    uint8_t  uid[7];       // Up to 7-byte UID
+    uint8_t  uidLen;       // Length of the UID (usually 4 or 7)
+    uint32_t floor_mask;   // Bitmask for floors (e.g., bit 3 = floor 3)
+    uint32_t valid_to;     // Unix timestamp for expiration (UTC)
+    uint16_t win_start_m;  // Active window start (minutes from midnight. e.g. 07:00 = 420)
+    uint16_t win_end_m;    // Active window end (minutes from midnight. e.g. 19:00 = 1140)
+};
+#pragma pack(pop)
+
 static_assert(sizeof(AccessRecord) == RECORD_SIZE, "AccessRecord must be 32 bytes");
 
 enum Direction : uint8_t { DIR_IN = 0, DIR_OUT = 1 };
@@ -131,7 +142,13 @@ const char* TOPIC_ACL       = "pdks/merkez/cfg/acl";
 uint32_t readPointer = 0, writePointer = 0, globalSequence = 0;
 uint32_t currentAclVersion = 0, queueCount = 0;
 uint32_t eventsSinceCheckpoint = 0, acksSinceCheckpoint = 0;
-std::vector<String> aclList;
+std::vector<AclRecord> aclList;
+
+// Helper comparator for sorting and binary search
+bool compareAclRecords(const AclRecord& a, const AclRecord& b) {
+    if (a.uidLen != b.uidLen) return a.uidLen < b.uidLen;
+    return memcmp(a.uid, b.uid, a.uidLen) < 0;
+}
 uint8_t currentTimeSource = TSRC_RTC;
 unsigned long lastNtpSync = 0;
 
@@ -275,23 +292,66 @@ void handleHardwareTimers() {
 // ============================================================
 void loadAclToRAM() {
     aclList.clear();
-    File file = LittleFS.open("/database.txt", FILE_READ);
-    if (!file) { Serial.println("ERROR: database.txt unavailable."); return; }
-    while (file.available()) {
-        String line = file.readStringUntil('\n');
-        line.trim();
-        line.toUpperCase();
-        if (line.length() > 0) aclList.push_back(line);
+    
+    // Switch to binary file
+    File file = LittleFS.open("/database.bin", FILE_READ);
+    if (!file) { 
+        Serial.println("ERROR: database.bin unavailable. No ACL loaded."); 
+        return; 
     }
+
+    size_t fileSize = file.size();
+    if (fileSize % sizeof(AclRecord) != 0) {
+        Serial.println("WARNING: database.bin size is not a multiple of AclRecord size.");
+    }
+
+    size_t recordCount = fileSize / sizeof(AclRecord);
+    aclList.reserve(recordCount); // Pre-allocate memory to prevent fragmentation
+
+    AclRecord record;
+    while (file.read(reinterpret_cast<uint8_t*>(&record), sizeof(AclRecord)) == sizeof(AclRecord)) {
+        aclList.push_back(record);
+    }
+    
     file.close();
-    std::sort(aclList.begin(), aclList.end());
-    Serial.printf("ACL loaded: %d records\n", aclList.size());
+
+    // Sort the vector by UID for fast binary searching later
+    std::sort(aclList.begin(), aclList.end(), compareAclRecords);
+    
+    Serial.printf("Binary ACL loaded: %d records\n", aclList.size());
 }
 
-bool isCardAuthorized(String uid) {
-    uid.trim();
-    uid.toUpperCase();
-    return std::binary_search(aclList.begin(), aclList.end(), uid);
+uint8_t evaluateAccess(const uint8_t* scannedUid, uint8_t uidLen, const DateTime& now) {
+    
+    // Create a dummy record just for the binary search
+    AclRecord target = {};
+    memcpy(target.uid, scannedUid, uidLen);
+    target.uidLen = uidLen;
+
+    auto it = std::lower_bound(aclList.begin(), aclList.end(), target, compareAclRecords);
+    
+    // 1. Is the card in the database?
+    if (it == aclList.end() || target.uidLen != it->uidLen || memcmp(target.uid, it->uid, target.uidLen) != 0) {
+        return RESULT_UNKNOWN;
+    }
+
+    // 2. Is the card expired?
+    if (now.unixtime() > it->valid_to) {
+        return RESULT_EXPIRED;
+    }
+
+    // 3. Is the card authorized for this floor? (Check the bitmask)
+    if ((it->floor_mask & (1UL << FLOOR_NUMBER)) == 0) {
+        return RESULT_UNKNOWN; // Or you could create a RESULT_WRONG_FLOOR
+    }
+
+    // 4. Is the card swiped within the allowed time window?
+    uint16_t current_minutes = (now.hour() * 60) + now.minute();
+    if (current_minutes < it->win_start_m || current_minutes >= it->win_end_m) {
+        return RESULT_SCHEDULE;
+    }
+
+    return RESULT_GRANTED;
 }
 
 // ============================================================
@@ -504,7 +564,16 @@ void handleExitButton() {
 
 void handleRFID() {
     if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return;
+    
+    // We still need the string version for the MQTT payload and logging
     String scannedUID = uidToString();
+    
+    // Extract raw bytes for the high-speed binary evaluator
+    uint8_t uidLen = rfid.uid.size;
+    uint8_t uidBytes[7];
+    memset(uidBytes, 0, sizeof(uidBytes));
+    memcpy(uidBytes, rfid.uid.uidByte, min((size_t)uidLen, sizeof(uidBytes)));
+
     rfid.PICC_HaltA();
     rfid.PCD_StopCrypto1();
 
@@ -515,9 +584,16 @@ void handleRFID() {
     lastScanTime = nowMillis;
     Serial.println("RFID UID: " + scannedUID);
 
-    bool authorized = isCardAuthorized(scannedUID);
-    if (logAccess(rtc.now(), scannedUID, DIR_IN, authorized ? RESULT_GRANTED : RESULT_UNKNOWN)) {
-        authorized ? grantAccess() : denyAccess();
+    // Pass raw bytes and RTC time to the evaluator
+    uint8_t resultCode = evaluateAccess(uidBytes, uidLen, rtc.now());
+    
+    // Log the specific ResultCode (GRANTED, EXPIRED, SCHEDULE, etc.)
+    if (logAccess(rtc.now(), scannedUID, DIR_IN, resultCode)) {
+        if (resultCode == RESULT_GRANTED) {
+            grantAccess();
+        } else {
+            denyAccess();
+        }
     }
 }
 
@@ -624,7 +700,7 @@ void networkTaskCode(void* parameter) {
                     hb["uptime"] = true; hb["queue"] = queueCount; 
                     hb["heap"] = ESP.getFreeHeap(); hb["rssi"] = 0;
                     String payload; serializeJson(hb, payload);
-                    mqtt.publish(TOPIC_HEARTBEAT, payload, false, 1);
+                    mqtt.publish(TOPIC_HEARTBEAT, payload, false, 0);
                     lastHeartbeat = now;
                 }
 
