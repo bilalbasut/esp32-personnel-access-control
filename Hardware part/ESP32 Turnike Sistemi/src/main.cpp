@@ -516,7 +516,7 @@ void processACLUpdate() {
     if (!aclMessageReceived) return;
     aclMessageReceived = false;
 
-    JsonDocument doc; // Note: with Mqtt Buffer at 4096, ArduinoJson v7 automatically manages memory
+    JsonDocument doc; 
     if (deserializeJson(doc, pendingAclPayload)) { Serial.println("ACL JSON parse failed."); return; }
 
     uint32_t newVersion = doc["ver"] | 0UL;
@@ -527,14 +527,60 @@ void processACLUpdate() {
 
     JsonArray cards = doc["cards"].as<JsonArray>();
     for (JsonVariant card : cards) {
-        String uid = card["uid"].as<String>();
-        uid.trim(); uid.toUpperCase();
-        if (uid.length() > 0) dbFile.println(uid);
-    }
-    dbFile.flush(); dbFile.close();
+        AclRecord record = {};
+        
+        String uidStr = card["uid"].as<String>();
+        uidStr.trim(); 
+        uidStr.toUpperCase();
+        
+        record.uidLen = min(static_cast<int>(uidStr.length() / 2), 7);
+        stringToBytes(uidStr, record.uid, 7);
+        
+        // Parse floors into a bitmask (e.g., [1, 3] sets bits 1 and 3)
+        JsonArray floors = card["floors"].as<JsonArray>();
+        for (JsonVariant f : floors) {
+            uint8_t floorNum = f.as<uint8_t>();
+            if (floorNum < 32) record.floor_mask |= (1UL << floorNum);
+        }
+        
+        // Default to max uint32 if valid_to is missing
+        record.valid_to = card["valid_to"] | 0xFFFFFFFF; 
+        
+        // Parse time window "07:00-19:00" into minutes from midnight
+        String win = card["win"].as<String>();
+        if (win.length() == 11) { 
+            uint16_t startH = win.substring(0, 2).toInt();
+            uint16_t startM = win.substring(3, 5).toInt();
+            uint16_t endH = win.substring(6, 8).toInt();
+            uint16_t endM = win.substring(9, 11).toInt();
+            
+            record.win_start_m = (startH * 60) + startM;
+            record.win_end_m = (endH * 60) + endM;
+        } else {
+            // Default to 24 hours if missing or invalid
+            record.win_start_m = 0;
+            record.win_end_m = 1440;
+        }
 
-    if (LittleFS.exists("/database.txt")) LittleFS.remove("/database.txt");
-    if (!LittleFS.rename("/database.tmp", "/database.txt")) { Serial.println("ERROR: ACL rename failed."); return; }
+        dbFile.write(reinterpret_cast<const uint8_t*>(&record), sizeof(AclRecord));
+    }
+    dbFile.flush(); 
+    dbFile.close();
+
+    // Atomic file swap mechanism
+    if (LittleFS.exists("/database.bin")) {
+        LittleFS.rename("/database.bin", "/database.bak");
+    }
+    
+    if (!LittleFS.rename("/database.tmp", "/database.bin")) { 
+        Serial.println("ERROR: ACL rename failed."); 
+        // Rollback on failure
+        if (LittleFS.exists("/database.bak")) LittleFS.rename("/database.bak", "/database.bin");
+        return; 
+    }
+    
+    // Clean up backup on success
+    if (LittleFS.exists("/database.bak")) LittleFS.remove("/database.bak");
 
     loadAclToRAM();
     currentAclVersion = newVersion;
@@ -620,11 +666,16 @@ void initRTC() {
 
 void initFileSystem() {
     if (!LittleFS.begin(true)) { Serial.println("ERROR: LittleFS mount failed."); return; }
-    if (!LittleFS.exists("/database.txt")) {
-        File file = LittleFS.open("/database.txt", FILE_WRITE);
-        if (file) { file.println("04A2B3C1D5E680"); file.close(); }
+    
+    // Touch the binary file if it doesn't exist
+    if (!LittleFS.exists("/database.bin")) {
+        File file = LittleFS.open("/database.bin", FILE_WRITE);
+        if (file) file.close(); 
     }
-    if (!LittleFS.exists(EVENT_FILE)) { File file = LittleFS.open(EVENT_FILE, FILE_WRITE); if(file) file.close(); }
+    if (!LittleFS.exists(EVENT_FILE)) { 
+        File file = LittleFS.open(EVENT_FILE, FILE_WRITE); 
+        if(file) file.close(); 
+    }
 }
 
 void initEthernet() {
