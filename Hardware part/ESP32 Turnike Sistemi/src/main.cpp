@@ -12,6 +12,7 @@
 #include <vector>
 #include <algorithm>
 #include <MQTT.h>
+#include <esp_task_wdt.h>
 
 #include <MFRC522v2.h>
 #include <MFRC522DriverSPI.h>
@@ -20,37 +21,35 @@
 // ============================================================
 // 1. CONFIGURATION
 // ============================================================
-
 #define FW_VERSION "1.2.0"
-
 #define DEVICE_ID "GATE-K3-01"
 #define FLOOR_NUMBER 3
 
-// ---------- Hardware ----------
+// Hardware Pins
 #define RELAY_PIN       32
 #define BUZZER_PIN      33
 #define GREEN_LED_PIN   25
 #define RED_LED_PIN     17
 #define EXIT_BUTTON_PIN 35
 
-// ---------- W5500 / VSPI ----------
+// W5500 / VSPI
 #define W5500_SCK_PIN   18
 #define W5500_MISO_PIN  19
 #define W5500_MOSI_PIN  23
 #define W5500_CS_PIN    5
 #define W5500_RST_PIN   4
 
-// ---------- MFRC522 / HSPI ----------
+// MFRC522 / HSPI
 #define RFID_SCK_PIN    14
 #define RFID_MISO_PIN   27
 #define RFID_MOSI_PIN   13
 #define RFID_SS_PIN     15
 
-// ---------- I2C ----------
+// I2C
 #define I2C_SDA_PIN     21
 #define I2C_SCL_PIN     22
 
-// ---------- Timing ----------
+// Timing
 #define RELAY_DURATION_MS       3000UL
 #define SUCCESS_BEEP_MS          250UL
 #define DENY_STEP_MS             150UL
@@ -58,2325 +57,641 @@
 #define EXIT_DEBOUNCE_MS          50UL
 #define HEARTBEAT_INTERVAL_MS  30000UL
 #define NTP_SYNC_INTERVAL_MS 3600000UL
+#define ACK_TIMEOUT_MS          2000UL
+#define PUBLISH_RATE_LIMIT_MS     50UL // max 20 msgs/sec
 
-// ---------- Persistent queue ----------
+// Persistent queue
 #define EVENT_FILE "/events.bin"
-
-// 20,000 records x 32 bytes = 640 KB
 #define MAX_EVENTS 20000
 #define RECORD_SIZE 32
-
-// NVS is NOT updated on every event.
-// A checkpoint is made after this many changes.
 #define CHECKPOINT_EVENT_INTERVAL 64
 #define CHECKPOINT_ACK_INTERVAL   16
 
 // ============================================================
-// 2. ACCESS RECORD
+// 2. DATA STRUCTURES & ENUMS
 // ============================================================
-
 #pragma pack(push, 1)
-
 struct AccessRecord {
-    uint32_t seq;          // 4
-    uint32_t ts;           // 4
-    uint8_t  uid[7];       // 7
-    uint8_t  uidLen;       // 1
-    uint8_t  dir;          // 1
-    uint8_t  result;       // 1
-    uint8_t  mode;         // 1
-    uint8_t  tsrc;         // 1
-    uint8_t  floor;        // 1
-    uint8_t  reserved[9];  // 9
-    uint16_t crc16;        // 2
+    uint32_t seq;
+    uint32_t ts;
+    uint8_t  uid[7];
+    uint8_t  uidLen;
+    uint8_t  dir;
+    uint8_t  result;
+    uint8_t  mode;
+    uint8_t  tsrc;
+    uint8_t  floor;
+    uint8_t  reserved[9];
+    uint16_t crc16;
 };
-
 #pragma pack(pop)
 
-static_assert(
-    sizeof(AccessRecord) == RECORD_SIZE,
-    "AccessRecord must be exactly 32 bytes"
-);
+static_assert(sizeof(AccessRecord) == RECORD_SIZE, "AccessRecord must be 32 bytes");
+
+enum Direction : uint8_t { DIR_IN = 0, DIR_OUT = 1 };
+enum ResultCode : uint8_t { RESULT_GRANTED = 0, RESULT_UNKNOWN = 1, RESULT_EXPIRED = 2, RESULT_SCHEDULE = 3, RESULT_MANUAL = 4 };
+enum TimeSource : uint8_t { TSRC_NTP = 0, TSRC_RTC = 1, TSRC_INVALID = 2 };
 
 // ============================================================
-// 3. ENUMS
+// 3. GLOBAL OBJECTS
 // ============================================================
-
-enum Direction : uint8_t {
-    DIR_IN  = 0,
-    DIR_OUT = 1
-};
-
-enum ResultCode : uint8_t {
-    RESULT_GRANTED  = 0,
-    RESULT_UNKNOWN  = 1,
-    RESULT_EXPIRED  = 2,
-    RESULT_SCHEDULE = 3,
-    RESULT_MANUAL   = 4
-};
-
-enum TimeSource : uint8_t {
-    TSRC_NTP     = 0,
-    TSRC_RTC     = 1,
-    TSRC_INVALID = 2
-};
-
-// ============================================================
-// 4. GLOBAL OBJECTS
-// ============================================================
-
 Preferences preferences;
-
 RTC_PCF8563 rtc;
-
 SPIClass hspi(HSPI);
 
-// MFRC522 uses HSPI
 MFRC522DriverPinSimple rfidSS(RFID_SS_PIN);
-
-MFRC522DriverSPI rfidDriver(
-    rfidSS,
-    hspi
-);
-
+MFRC522DriverSPI rfidDriver(rfidSS, hspi);
 MFRC522 rfid(rfidDriver);
 
-// W5500 uses the ESP32 global SPI / VSPI
 EthernetUDP ntpUDP;
-
-NTPClient timeClient(
-    ntpUDP,
-    "pool.ntp.org",
-    0,
-    60000
-);
-
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
 EthernetClient ethClient;
 
-// 256dpi MQTT library
-MQTTClient mqtt(512);
-
-// Network task
+// Increased to 4096 bytes to safely handle retained ACL JSON payloads
+MQTTClient mqtt(4096);
 TaskHandle_t NetworkTask = nullptr;
 
-// ============================================================
-// 5. NETWORK CONFIGURATION
-// ============================================================
-
-byte mac[] = {
-    0x00,
-    0x1A,
-    0x2B,
-    0x3C,
-    0x4D,
-    0x5E
-};
-
-// Change these to match your LAN.
-IPAddress deviceIP(
-    192, 168, 1, 50
-);
-
-IPAddress dnsIP(
-    192, 168, 1, 1
-);
-
-IPAddress gatewayIP(
-    192, 168, 1, 1
-);
-
-IPAddress subnetMask(
-    255, 255, 255, 0
-);
-
-IPAddress mqttServer(
-    192, 168, 1, 100
-);
-
+// Network Config
+byte mac[] = { 0x00, 0x1A, 0x2B, 0x3C, 0x4D, 0x5E };
+IPAddress deviceIP(192, 168, 1, 50);
+IPAddress dnsIP(192, 168, 1, 1);
+IPAddress gatewayIP(192, 168, 1, 1);
+IPAddress subnetMask(255, 255, 255, 0);
+IPAddress mqttServer(192, 168, 1, 100);
 const uint16_t MQTT_PORT = 1883;
 
-// ============================================================
-// 6. MQTT TOPICS
-// ============================================================
+// Topics
+const char* TOPIC_EVENT     = "pdks/merkez/dev/GATE-K3-01/event";
+const char* TOPIC_EVENT_ACK = "pdks/merkez/dev/GATE-K3-01/event/ack";
+const char* TOPIC_STATUS    = "pdks/merkez/dev/GATE-K3-01/status";
+const char* TOPIC_HEARTBEAT = "pdks/merkez/dev/GATE-K3-01/hb";
+const char* TOPIC_ACL       = "pdks/merkez/cfg/acl";
 
-const char* TOPIC_EVENT =
-    "pdks/merkez/dev/GATE-K3-01/event";
-
-const char* TOPIC_EVENT_ACK =
-    "pdks/merkez/dev/GATE-K3-01/event/ack";
-
-const char* TOPIC_STATUS =
-    "pdks/merkez/dev/GATE-K3-01/status";
-
-const char* TOPIC_HEARTBEAT =
-    "pdks/merkez/dev/GATE-K3-01/hb";
-
-const char* TOPIC_ACL =
-    "pdks/merkez/cfg/acl";
-
-// ============================================================
-// 7. RAM STATE
-// ============================================================
-
-// Persistent queue indexes.
-// These are RAM-first values.
-// NVS only stores periodic checkpoints.
-uint32_t readPointer  = 0;
-uint32_t writePointer = 0;
-
-uint32_t globalSequence = 0;
-
-uint32_t currentAclVersion = 0;
-
-// Number of records currently waiting for ACK.
-// Calculated from RAM pointers.
-uint32_t queueCount = 0;
-
-// NVS checkpoint counters
-uint32_t eventsSinceCheckpoint = 0;
-uint32_t acksSinceCheckpoint = 0;
-
-// ACL
+// RAM State
+uint32_t readPointer = 0, writePointer = 0, globalSequence = 0;
+uint32_t currentAclVersion = 0, queueCount = 0;
+uint32_t eventsSinceCheckpoint = 0, acksSinceCheckpoint = 0;
 std::vector<String> aclList;
-
-// Time source
 uint8_t currentTimeSource = TSRC_RTC;
-
 unsigned long lastNtpSync = 0;
 
-// ============================================================
-// 8. HARDWARE STATE
-// ============================================================
-
-bool isRelayActive = false;
-unsigned long relayStartTime = 0;
-
-bool isSuccessBeepActive = false;
-unsigned long successBeepStartTime = 0;
-
-bool isDenySequenceActive = false;
-unsigned long lastDenyStepTime = 0;
-
+// Hardware & Debounce State
+bool isRelayActive = false, isSuccessBeepActive = false, isDenySequenceActive = false;
+unsigned long relayStartTime = 0, successBeepStartTime = 0, lastDenyStepTime = 0;
 uint8_t denyBeepCount = 0;
 bool denyLedState = false;
-
-// ============================================================
-// 9. EXIT BUTTON DEBOUNCE
-// ============================================================
-
-bool lastExitButtonState = HIGH;
-bool stableExitButtonState = HIGH;
-
+bool lastExitButtonState = HIGH, stableExitButtonState = HIGH;
 unsigned long lastExitDebounceTime = 0;
-
-// ============================================================
-// 10. RFID DEBOUNCE
-// ============================================================
-
 String lastScannedUID = "";
 unsigned long lastScanTime = 0;
 
-// ============================================================
-// 11. MQTT CALLBACK FLAGS
-// ============================================================
-
-// IMPORTANT:
-// We do NOT publish/subscribe from inside the MQTT callback.
-// The callback only stores the received data.
-// The network task processes it afterwards.
-
+// MQTT Flags
 volatile bool ackReceived = false;
 volatile uint32_t pendingAckSeq = 0;
-
 volatile bool aclMessageReceived = false;
-
 String pendingAclPayload;
 
 // ============================================================
-// 12. CRC16
+// 4. HELPERS (CRC, UID, Formatting)
 // ============================================================
-
-uint16_t calculateCRC16(
-    const uint8_t* data,
-    size_t length
-) {
+uint16_t calculateCRC16(const uint8_t* data, size_t length) {
     uint16_t crc = 0xFFFF;
-
     for (size_t i = 0; i < length; i++) {
         crc ^= data[i];
-
-        for (uint8_t bit = 0; bit < 8; bit++) {
-            if (crc & 0x0001) {
-                crc = (crc >> 1) ^ 0xA001;
-            } else {
-                crc >>= 1;
-            }
-        }
+        for (uint8_t bit = 0; bit < 8; bit++) crc = (crc & 0x0001) ? (crc >> 1) ^ 0xA001 : (crc >> 1);
     }
-
     return crc;
 }
 
-uint16_t calculateRecordCRC(
-    const AccessRecord& record
-) {
-    return calculateCRC16(
-        reinterpret_cast<const uint8_t*>(&record),
-        sizeof(AccessRecord) - sizeof(record.crc16)
-    );
+uint16_t calculateRecordCRC(const AccessRecord& record) {
+    return calculateCRC16(reinterpret_cast<const uint8_t*>(&record), sizeof(AccessRecord) - sizeof(record.crc16));
 }
 
-bool isRecordValid(
-    const AccessRecord& record
-) {
-    if (record.seq == 0) {
-        return false;
-    }
-
-    if (record.uidLen > 7) {
-        return false;
-    }
-
-    return (
-        calculateRecordCRC(record) ==
-        record.crc16
-    );
+bool isRecordValid(const AccessRecord& record) {
+    if (record.seq == 0 || record.uidLen > 7) return false;
+    return calculateRecordCRC(record) == record.crc16;
 }
 
-// ============================================================
-// 13. UID HELPERS
-// ============================================================
-
-void stringToBytes(
-    const String& hexString,
-    uint8_t* byteArray,
-    uint8_t maxLen
-) {
-    for (
-        uint8_t i = 0;
-        i < maxLen;
-        i++
-    ) {
-        byteArray[i] = 0;
-    }
-
-    for (
-        uint16_t i = 0;
-        i + 1 < hexString.length() &&
-        (i / 2) < maxLen;
-        i += 2
-    ) {
-        String byteString =
-            hexString.substring(i, i + 2);
-
-        byteArray[i / 2] =
-            static_cast<uint8_t>(
-                strtol(
-                    byteString.c_str(),
-                    nullptr,
-                    16
-                )
-            );
+void stringToBytes(const String& hexString, uint8_t* byteArray, uint8_t maxLen) {
+    memset(byteArray, 0, maxLen);
+    for (uint16_t i = 0; i + 1 < hexString.length() && (i / 2) < maxLen; i += 2) {
+        byteArray[i / 2] = static_cast<uint8_t>(strtol(hexString.substring(i, i + 2).c_str(), nullptr, 16));
     }
 }
 
 String uidToString() {
     String uid;
-
-    for (
-        byte i = 0;
-        i < rfid.uid.size;
-        i++
-    ) {
-        if (rfid.uid.uidByte[i] < 0x10) {
-            uid += "0";
-        }
-
-        uid += String(
-            rfid.uid.uidByte[i],
-            HEX
-        );
+    for (byte i = 0; i < rfid.uid.size; i++) {
+        if (rfid.uid.uidByte[i] < 0x10) uid += "0";
+        uid += String(rfid.uid.uidByte[i], HEX);
     }
-
     uid.toUpperCase();
-
     return uid;
 }
 
-String recordUIDToString(
-    const AccessRecord& record
-) {
+String recordUIDToString(const AccessRecord& record) {
     String uid;
-
-    for (
-        uint8_t i = 0;
-        i < record.uidLen &&
-        i < 7;
-        i++
-    ) {
-        if (record.uid[i] < 0x10) {
-            uid += "0";
-        }
-
-        uid += String(
-            record.uid[i],
-            HEX
-        );
+    for (uint8_t i = 0; i < record.uidLen && i < 7; i++) {
+        if (record.uid[i] < 0x10) uid += "0";
+        uid += String(record.uid[i], HEX);
     }
-
     uid.toUpperCase();
-
     return uid;
 }
 
-// ============================================================
-// 14. RESULT / MODE / TIME SOURCE TEXT
-// ============================================================
-
-const char* resultToText(
-    uint8_t result
-) {
+const char* resultToText(uint8_t result) {
     switch (result) {
-        case RESULT_GRANTED:
-            return "granted";
-
-        case RESULT_UNKNOWN:
-            return "unknown";
-
-        case RESULT_EXPIRED:
-            return "expired";
-
-        case RESULT_SCHEDULE:
-            return "schedule";
-
-        case RESULT_MANUAL:
-            return "manual";
-
-        default:
-            return "unknown";
+        case RESULT_GRANTED: return "granted";
+        case RESULT_UNKNOWN: return "unknown";
+        case RESULT_EXPIRED: return "expired";
+        case RESULT_SCHEDULE: return "schedule";
+        case RESULT_MANUAL: return "manual";
+        default: return "unknown";
     }
 }
-
-const char* directionToText(
-    uint8_t direction
-) {
-    return direction == DIR_OUT
-        ? "out"
-        : "in";
-}
-
-const char* modeToText(
-    uint8_t mode
-) {
-    return mode == 0
-        ? "online"
-        : "offline";
-}
-
-const char* timeSourceToText(
-    uint8_t source
-) {
-    switch (source) {
-        case TSRC_NTP:
-            return "ntp";
-
-        case TSRC_RTC:
-            return "rtc";
-
-        default:
-            return "invalid";
-    }
+const char* directionToText(uint8_t direction) { return direction == DIR_OUT ? "out" : "in"; }
+const char* modeToText(uint8_t mode) { return mode == 0 ? "online" : "offline"; }
+const char* timeSourceToText(uint8_t source) {
+    switch (source) { case TSRC_NTP: return "ntp"; case TSRC_RTC: return "rtc"; default: return "invalid"; }
 }
 
 // ============================================================
-// 15. HARDWARE CONTROL
+// 5. HARDWARE CONTROL
 // ============================================================
-
 void grantAccess() {
-
     isDenySequenceActive = false;
-
-    digitalWrite(
-        RED_LED_PIN,
-        LOW
-    );
-
+    digitalWrite(RED_LED_PIN, LOW);
     isRelayActive = true;
     relayStartTime = millis();
-
-    digitalWrite(
-        RELAY_PIN,
-        HIGH
-    );
-
-    digitalWrite(
-        GREEN_LED_PIN,
-        HIGH
-    );
-
+    digitalWrite(RELAY_PIN, HIGH);
+    digitalWrite(GREEN_LED_PIN, HIGH);
     isSuccessBeepActive = true;
     successBeepStartTime = millis();
-
-    digitalWrite(
-        BUZZER_PIN,
-        HIGH
-    );
+    digitalWrite(BUZZER_PIN, HIGH);
 }
 
 void denyAccess() {
-
-    if (isRelayActive) {
-        return;
-    }
-
+    if (isRelayActive) return;
     isDenySequenceActive = true;
-
     denyBeepCount = 0;
     denyLedState = true;
-
     lastDenyStepTime = millis();
-
-    digitalWrite(
-        RED_LED_PIN,
-        HIGH
-    );
-
-    digitalWrite(
-        BUZZER_PIN,
-        HIGH
-    );
+    digitalWrite(RED_LED_PIN, HIGH);
+    digitalWrite(BUZZER_PIN, HIGH);
 }
 
 void handleHardwareTimers() {
-
-    const unsigned long now =
-        millis();
-
-    // ---------- Relay ----------
-
-    if (
-        isRelayActive &&
-        now - relayStartTime >=
-            RELAY_DURATION_MS
-    ) {
-
+    const unsigned long now = millis();
+    if (isRelayActive && now - relayStartTime >= RELAY_DURATION_MS) {
         isRelayActive = false;
-
-        digitalWrite(
-            RELAY_PIN,
-            LOW
-        );
-
-        digitalWrite(
-            GREEN_LED_PIN,
-            LOW
-        );
+        digitalWrite(RELAY_PIN, LOW);
+        digitalWrite(GREEN_LED_PIN, LOW);
     }
-
-    // ---------- Success beep ----------
-
-    if (
-        isSuccessBeepActive &&
-        now - successBeepStartTime >=
-            SUCCESS_BEEP_MS
-    ) {
-
+    if (isSuccessBeepActive && now - successBeepStartTime >= SUCCESS_BEEP_MS) {
         isSuccessBeepActive = false;
-
-        digitalWrite(
-            BUZZER_PIN,
-            LOW
-        );
+        digitalWrite(BUZZER_PIN, LOW);
     }
-
-    // ---------- Deny sequence ----------
-
-    if (isDenySequenceActive) {
-
-        if (
-            now - lastDenyStepTime >=
-            DENY_STEP_MS
-        ) {
-
-            lastDenyStepTime = now;
-
-            if (denyLedState) {
-
-                digitalWrite(
-                    RED_LED_PIN,
-                    LOW
-                );
-
-                digitalWrite(
-                    BUZZER_PIN,
-                    LOW
-                );
-
-                denyLedState = false;
-                denyBeepCount++;
-
+    if (isDenySequenceActive && now - lastDenyStepTime >= DENY_STEP_MS) {
+        lastDenyStepTime = now;
+        if (denyLedState) {
+            digitalWrite(RED_LED_PIN, LOW);
+            digitalWrite(BUZZER_PIN, LOW);
+            denyLedState = false;
+            denyBeepCount++;
+        } else {
+            if (denyBeepCount < 3) {
+                digitalWrite(RED_LED_PIN, HIGH);
+                digitalWrite(BUZZER_PIN, HIGH);
+                denyLedState = true;
             } else {
-
-                if (denyBeepCount < 3) {
-
-                    digitalWrite(
-                        RED_LED_PIN,
-                        HIGH
-                    );
-
-                    digitalWrite(
-                        BUZZER_PIN,
-                        HIGH
-                    );
-
-                    denyLedState = true;
-
-                } else {
-
-                    isDenySequenceActive =
-                        false;
-                }
+                isDenySequenceActive = false;
             }
         }
     }
 }
 
 // ============================================================
-// 16. ACL
+// 6. ACL & FILE SYSTEM
 // ============================================================
-
 void loadAclToRAM() {
-
     aclList.clear();
-
-    File file =
-        LittleFS.open(
-            "/database.txt",
-            FILE_READ
-        );
-
-    if (!file) {
-
-        Serial.println(
-            "ERROR: database.txt unavailable."
-        );
-
-        return;
-    }
-
+    File file = LittleFS.open("/database.txt", FILE_READ);
+    if (!file) { Serial.println("ERROR: database.txt unavailable."); return; }
     while (file.available()) {
-
-        String line =
-            file.readStringUntil('\n');
-
+        String line = file.readStringUntil('\n');
         line.trim();
         line.toUpperCase();
-
-        if (line.length() > 0) {
-            aclList.push_back(line);
-        }
+        if (line.length() > 0) aclList.push_back(line);
     }
-
     file.close();
-
-    std::sort(
-        aclList.begin(),
-        aclList.end()
-    );
-
-    Serial.print(
-        "ACL loaded: "
-    );
-
-    Serial.println(
-        aclList.size()
-    );
+    std::sort(aclList.begin(), aclList.end());
+    Serial.printf("ACL loaded: %d records\n", aclList.size());
 }
 
-bool isCardAuthorized(
-    String uid
-) {
+bool isCardAuthorized(String uid) {
     uid.trim();
     uid.toUpperCase();
-
-    return std::binary_search(
-        aclList.begin(),
-        aclList.end(),
-        uid
-    );
+    return std::binary_search(aclList.begin(), aclList.end(), uid);
 }
 
 // ============================================================
-// 17. QUEUE HELPERS
+// 7. QUEUE MANAGEMENT
 // ============================================================
+uint32_t queueDistance(uint32_t r, uint32_t w) { return (w >= r) ? w - r : (MAX_EVENTS - r + w); }
+bool queueIsFull() { return queueCount >= MAX_EVENTS; }
+bool queueIsEmpty() { return readPointer == writePointer; }
 
-uint32_t queueDistance(
-    uint32_t readIndex,
-    uint32_t writeIndex
-) {
-    if (writeIndex >= readIndex) {
-        return writeIndex - readIndex;
-    }
+File openEventFile(const char* mode) { return LittleFS.open(EVENT_FILE, mode); }
 
-    return (
-        MAX_EVENTS -
-        readIndex +
-        writeIndex
-    );
+bool writeEventRecord(const AccessRecord& record, uint32_t index) {
+    File file = openEventFile("r+");
+    if (!file) file = openEventFile("w+");
+    if (!file) { Serial.println("ERROR: Cannot open events.bin"); return false; }
+    
+    if (!file.seek(index * RECORD_SIZE, SeekSet)) { file.close(); return false; }
+    size_t written = file.write(reinterpret_cast<const uint8_t*>(&record), sizeof(record));
+    file.flush(); file.close();
+    return written == sizeof(record);
 }
 
-bool queueIsFull() {
-    return queueCount >= MAX_EVENTS;
-}
-
-bool queueIsEmpty() {
-    return readPointer == writePointer;
-}
-
-// ============================================================
-// 18. OPEN EVENT FILE
-// ============================================================
-
-File openEventFile(
-    const char* mode
-) {
-    return LittleFS.open(
-        EVENT_FILE,
-        mode
-    );
-}
-
-// ============================================================
-// 19. WRITE EVENT RECORD
-// ============================================================
-
-bool writeEventRecord(
-    const AccessRecord& record,
-    uint32_t index
-) {
-
-    File file =
-        openEventFile("r+");
-
-    if (!file) {
-
-        // First creation
-        file =
-            openEventFile("w+");
-    }
-
-    if (!file) {
-
-        Serial.println(
-            "ERROR: Cannot open events.bin"
-        );
-
-        return false;
-    }
-
-    const uint32_t offset =
-        index * RECORD_SIZE;
-
-    if (!file.seek(
-            offset,
-            SeekSet
-        )) {
-
-        Serial.println(
-            "ERROR: Queue seek failed."
-        );
-
-        file.close();
-
-        return false;
-    }
-
-    const size_t written =
-        file.write(
-            reinterpret_cast<
-                const uint8_t*
-            >(&record),
-            sizeof(record)
-        );
-
-    file.flush();
+bool readEventRecord(uint32_t index, AccessRecord& record) {
+    File file = openEventFile(FILE_READ);
+    if (!file) return false;
+    uint32_t offset = index * RECORD_SIZE;
+    if (file.size() < offset + RECORD_SIZE || !file.seek(offset, SeekSet)) { file.close(); return false; }
+    size_t readBytes = file.read(reinterpret_cast<uint8_t*>(&record), sizeof(record));
     file.close();
-
-    return written ==
-        sizeof(record);
+    return readBytes == sizeof(record);
 }
-
-// ============================================================
-// 20. READ EVENT RECORD
-// ============================================================
-
-bool readEventRecord(
-    uint32_t index,
-    AccessRecord& record
-) {
-
-    File file =
-        openEventFile(
-            FILE_READ
-        );
-
-    if (!file) {
-        return false;
-    }
-
-    const uint32_t offset =
-        index * RECORD_SIZE;
-
-    if (
-        file.size() <
-        offset + RECORD_SIZE
-    ) {
-        file.close();
-        return false;
-    }
-
-    if (!file.seek(
-            offset,
-            SeekSet
-        )) {
-
-        file.close();
-        return false;
-    }
-
-    const size_t readBytes =
-        file.read(
-            reinterpret_cast<
-                uint8_t*
-            >(&record),
-            sizeof(record)
-        );
-
-    file.close();
-
-    return readBytes ==
-        sizeof(record);
-}
-
-// ============================================================
-// 21. FIND QUEUE STATE AFTER REBOOT
-// ============================================================
 
 void rebuildQueueState() {
-
     uint32_t newestSeq = 0;
     int newestIndex = -1;
-
     uint32_t validCount = 0;
 
-    for (
-        uint32_t i = 0;
-        i < MAX_EVENTS;
-        i++
-    ) {
-
+    for (uint32_t i = 0; i < MAX_EVENTS; i++) {
         AccessRecord record;
-
-        if (
-            !readEventRecord(
-                i,
-                record
-            )
-        ) {
-            continue;
-        }
-
-        if (!isRecordValid(record)) {
-            continue;
-        }
-
+        if (!readEventRecord(i, record) || !isRecordValid(record)) continue;
         validCount++;
-
-        if (
-            record.seq > newestSeq
-        ) {
-            newestSeq = record.seq;
-            newestIndex =
-                static_cast<int>(i);
-        }
+        if (record.seq > newestSeq) { newestSeq = record.seq; newestIndex = static_cast<int>(i); }
     }
 
     if (newestIndex < 0) {
-
-        readPointer = 0;
-        writePointer = 0;
-        queueCount = 0;
-
-        return;
+        readPointer = 0; writePointer = 0; queueCount = 0; return;
     }
 
-    writePointer =
-        (
-            static_cast<uint32_t>(
-                newestIndex
-            ) + 1
-        ) % MAX_EVENTS;
-
-    globalSequence =
-        max(
-            globalSequence,
-            newestSeq
-        );
-
-    // NVS read pointer is only a checkpoint.
-    // If it is behind, duplicates are harmless because
-    // the server deduplicates by seq.
-    if (
-        readPointer >= MAX_EVENTS
-    ) {
-        readPointer = 0;
-    }
-
-    queueCount =
-        queueDistance(
-            readPointer,
-            writePointer
-        );
-
-    if (
-        queueCount > MAX_EVENTS
-    ) {
-        queueCount = validCount;
-    }
-
-    Serial.print(
-        "Queue rebuilt. read="
-    );
-    Serial.print(readPointer);
-
-    Serial.print(
-        " write="
-    );
-    Serial.print(writePointer);
-
-    Serial.print(
-        " count="
-    );
-    Serial.println(queueCount);
+    writePointer = (static_cast<uint32_t>(newestIndex) + 1) % MAX_EVENTS;
+    globalSequence = max(globalSequence, newestSeq);
+    if (readPointer >= MAX_EVENTS) readPointer = 0;
+    
+    queueCount = queueDistance(readPointer, writePointer);
+    if (queueCount > MAX_EVENTS) queueCount = validCount;
+    Serial.printf("Queue rebuilt. read=%d write=%d count=%d\n", readPointer, writePointer, queueCount);
 }
 
-// ============================================================
-// 22. NVS CHECKPOINT
-// ============================================================
-
-void saveCheckpoint(
-    bool force = false
-) {
-
-    if (
-        !force &&
-        eventsSinceCheckpoint <
-            CHECKPOINT_EVENT_INTERVAL &&
-        acksSinceCheckpoint <
-            CHECKPOINT_ACK_INTERVAL
-    ) {
-        return;
-    }
-
-    preferences.putUInt(
-        "readPtr",
-        readPointer
-    );
-
-    preferences.putUInt(
-        "writePtr",
-        writePointer
-    );
-
-    preferences.putUInt(
-        "seq",
-        globalSequence
-    );
-
-    preferences.putUInt(
-        "aclVer",
-        currentAclVersion
-    );
-
-    eventsSinceCheckpoint = 0;
-    acksSinceCheckpoint = 0;
-
-    Serial.println(
-        "NVS checkpoint saved."
-    );
+void saveCheckpoint(bool force = false) {
+    if (!force && eventsSinceCheckpoint < CHECKPOINT_EVENT_INTERVAL && acksSinceCheckpoint < CHECKPOINT_ACK_INTERVAL) return;
+    preferences.putUInt("readPtr", readPointer);
+    preferences.putUInt("writePtr", writePointer);
+    preferences.putUInt("seq", globalSequence);
+    preferences.putUInt("aclVer", currentAclVersion);
+    eventsSinceCheckpoint = 0; acksSinceCheckpoint = 0;
 }
 
-// ============================================================
-// 23. LOG ACCESS
-// ============================================================
-
-bool logAccess(
-    const DateTime& now,
-    const String& scannedUID,
-    uint8_t direction,
-    uint8_t resultCode
-) {
-
-    if (queueIsFull()) {
-
-        Serial.println(
-            "QUEUE FULL - ACCESS EVENT NOT WRITTEN"
-        );
-
-        // Audit integrity is more important than
-        // silently overwriting an unacknowledged event.
-        return false;
-    }
+bool logAccess(const DateTime& now, const String& scannedUID, uint8_t direction, uint8_t resultCode) {
+    if (queueIsFull()) { Serial.println("QUEUE FULL - EVENT DROPPED"); return false; }
 
     AccessRecord record = {};
+    record.seq = ++globalSequence;
+    record.ts = now.unixtime();
+    record.uidLen = min(static_cast<int>(scannedUID.length() / 2), 7);
+    stringToBytes(scannedUID, record.uid, 7);
+    record.dir = direction;
+    record.result = resultCode;
+    record.mode = mqtt.connected() ? 0 : 1;
+    record.tsrc = currentTimeSource;
+    record.floor = FLOOR_NUMBER;
+    record.crc16 = calculateRecordCRC(record);
 
-    globalSequence++;
-
-    record.seq =
-        globalSequence;
-
-    record.ts =
-        now.unixtime();
-
-    record.uidLen =
-        min(
-            static_cast<int>(
-                scannedUID.length() / 2
-            ),
-            7
-        );
-
-    stringToBytes(
-        scannedUID,
-        record.uid,
-        7
-    );
-
-    record.dir =
-        direction;
-
-    record.result =
-        resultCode;
-
-    // This event was generated while MQTT
-    // was connected or offline.
-    record.mode =
-        mqtt.connected()
-            ? 0
-            : 1;
-
-    record.tsrc =
-        currentTimeSource;
-
-    record.floor =
-        FLOOR_NUMBER;
-
-    record.crc16 =
-        calculateRecordCRC(
-            record
-        );
-
-    if (
-        !writeEventRecord(
-            record,
-            writePointer
-        )
-    ) {
-
-        Serial.println(
-            "ERROR: Event write failed."
-        );
-
+    if (!writeEventRecord(record, writePointer)) {
         globalSequence--;
-
+        Serial.println("ERROR: Event write failed.");
         return false;
     }
 
-    writePointer =
-        (
-            writePointer + 1
-        ) % MAX_EVENTS;
-
+    writePointer = (writePointer + 1) % MAX_EVENTS;
     queueCount++;
-
     eventsSinceCheckpoint++;
-
-    Serial.print(
-        "EVENT STORED seq="
-    );
-
-    Serial.println(
-        record.seq
-    );
-
-    // Important:
-    // Event is physically stored before
-    // the relay is activated.
+    Serial.printf("EVENT STORED seq=%d\n", record.seq);
     saveCheckpoint(false);
-
     return true;
 }
 
 // ============================================================
-// 24. MQTT CALLBACK
+// 8. MQTT & NETWORKING
 // ============================================================
-
-void mqttCallback(
-    String& topic,
-    String& payload
-) {
-
-    if (
-        topic ==
-        TOPIC_EVENT_ACK
-    ) {
-
+void mqttCallback(String& topic, String& payload) {
+    if (topic == TOPIC_EVENT_ACK) {
         JsonDocument doc;
-
-        if (
-            deserializeJson(
-                doc,
-                payload
-            )
-        ) {
-
-            Serial.println(
-                "Invalid ACK JSON."
-            );
-
-            return;
-        }
-
-        pendingAckSeq =
-            doc["ack_seq"] |
-            0UL;
-
+        if (deserializeJson(doc, payload)) { Serial.println("Invalid ACK JSON."); return; }
+        pendingAckSeq = doc["ack_seq"] | 0UL;
         ackReceived = true;
-
-        return;
-    }
-
-    if (
-        topic ==
-        TOPIC_ACL
-    ) {
-
-        pendingAclPayload =
-            payload;
-
-        aclMessageReceived =
-            true;
+    } else if (topic == TOPIC_ACL) {
+        pendingAclPayload = payload;
+        aclMessageReceived = true;
     }
 }
 
-// ============================================================
-// 25. PROCESS ACK
-// ============================================================
-
-void processPendingAck() {
-
-    if (!ackReceived) {
-        return;
-    }
-
+// Returns boolean indicating if a message is currently waiting for ack
+bool processPendingAck(bool currentlyWaiting) {
+    if (!ackReceived) return currentlyWaiting;
     ackReceived = false;
 
-    const uint32_t ackSeq =
-        pendingAckSeq;
-
-    if (queueIsEmpty()) {
-        return;
-    }
-
+    if (queueIsEmpty()) return currentlyWaiting;
     AccessRecord record;
+    if (!readEventRecord(readPointer, record) || !isRecordValid(record)) return currentlyWaiting;
 
-    if (
-        !readEventRecord(
-            readPointer,
-            record
-        )
-    ) {
-
-        Serial.println(
-            "ACK: Cannot read queue head."
-        );
-
-        return;
+    if (record.seq == pendingAckSeq) {
+        readPointer = (readPointer + 1) % MAX_EVENTS;
+        if (queueCount > 0) queueCount--;
+        acksSinceCheckpoint++;
+        Serial.printf("ACK accepted seq=%d\n", pendingAckSeq);
+        saveCheckpoint(false);
+        return false; // No longer waiting for this ACK
     }
-
-    if (!isRecordValid(record)) {
-
-        Serial.println(
-            "ACK: Corrupt queue record."
-        );
-
-        // Do NOT silently advance.
-        // Audit data must not disappear.
-        return;
-    }
-
-    if (
-        record.seq != ackSeq
-    ) {
-
-        Serial.print(
-            "ACK mismatch. expected="
-        );
-
-        Serial.print(record.seq);
-
-        Serial.print(
-            " received="
-        );
-
-        Serial.println(ackSeq);
-
-        return;
-    }
-
-    readPointer =
-        (
-            readPointer + 1
-        ) % MAX_EVENTS;
-
-    if (queueCount > 0) {
-        queueCount--;
-    }
-
-    acksSinceCheckpoint++;
-
-    Serial.print(
-        "ACK accepted seq="
-    );
-
-    Serial.println(
-        ackSeq
-    );
-
-    saveCheckpoint(false);
+    return currentlyWaiting;
 }
 
-// ============================================================
-// 26. MQTT PAYLOAD
-// ============================================================
-
-bool buildEventPayload(
-    const AccessRecord& record,
-    char* buffer,
-    size_t bufferSize
-) {
-
+bool buildEventPayload(const AccessRecord& record, char* buffer, size_t bufferSize) {
     JsonDocument doc;
-
-    doc["seq"] =
-        record.seq;
-
-    doc["dev"] =
-        DEVICE_ID;
-
-    doc["uid"] =
-        recordUIDToString(
-            record
-        );
-
-    doc["ts"] =
-        record.ts;
-
-    doc["tsrc"] =
-        timeSourceToText(
-            record.tsrc
-        );
-
-    doc["floor"] =
-        record.floor;
-
-    doc["dir"] =
-        directionToText(
-            record.dir
-        );
-
-    doc["res"] =
-        resultToText(
-            record.result
-        );
-
-    doc["mode"] =
-        modeToText(
-            record.mode
-        );
-
-    doc["fw"] =
-        FW_VERSION;
-
-    return serializeJson(
-        doc,
-        buffer,
-        bufferSize
-    ) > 0;
+    doc["seq"] = record.seq;
+    doc["dev"] = DEVICE_ID;
+    doc["uid"] = recordUIDToString(record);
+    doc["ts"] = record.ts;
+    doc["tsrc"] = timeSourceToText(record.tsrc);
+    doc["floor"] = record.floor;
+    doc["dir"] = directionToText(record.dir);
+    doc["res"] = resultToText(record.result);
+    doc["mode"] = modeToText(record.mode);
+    doc["fw"] = FW_VERSION;
+    return serializeJson(doc, buffer, bufferSize) > 0;
 }
-
-// ============================================================
-// 27. PUBLISH QUEUE HEAD - QoS 1
-// ============================================================
 
 bool publishQueueHead() {
-
-    if (
-        !mqtt.connected() ||
-        queueIsEmpty()
-    ) {
-        return false;
-    }
-
+    if (!mqtt.connected() || queueIsEmpty()) return false;
     AccessRecord record;
-
-    if (
-        !readEventRecord(
-            readPointer,
-            record
-        )
-    ) {
-
-        Serial.println(
-            "QUEUE: read failed."
-        );
-
-        return false;
-    }
-
-    if (
-        !isRecordValid(record)
-    ) {
-
-        Serial.println(
-            "QUEUE: CRC error."
-        );
-
-        return false;
-    }
+    if (!readEventRecord(readPointer, record) || !isRecordValid(record)) return false;
 
     char payload[384];
+    if (!buildEventPayload(record, payload, sizeof(payload))) return false;
 
-    if (
-        !buildEventPayload(
-            record,
-            payload,
-            sizeof(payload)
-        )
-    ) {
-
-        Serial.println(
-            "QUEUE: payload creation failed."
-        );
-
-        return false;
-    }
-
-    // QoS 1.
-    // The library waits for PUBACK.
-    const bool published =
-        mqtt.publish(
-            TOPIC_EVENT,
-            payload,
-            false,
-            1
-        );
-
-    if (published) {
-
-        Serial.print(
-            "QoS1 publish successful seq="
-        );
-
-        Serial.println(
-            record.seq
-        );
-    }
-
+    bool published = mqtt.publish(TOPIC_EVENT, payload, false, 1);
+    if (published) Serial.printf("QoS1 publish seq=%d\n", record.seq);
     return published;
 }
 
-// ============================================================
-// 28. ACL PROCESSING
-// ============================================================
-
 void processACLUpdate() {
-
-    if (!aclMessageReceived) {
-        return;
-    }
-
+    if (!aclMessageReceived) return;
     aclMessageReceived = false;
 
-    JsonDocument doc;
+    JsonDocument doc; // Note: with Mqtt Buffer at 4096, ArduinoJson v7 automatically manages memory
+    if (deserializeJson(doc, pendingAclPayload)) { Serial.println("ACL JSON parse failed."); return; }
 
-    DeserializationError error =
-        deserializeJson(
-            doc,
-            pendingAclPayload
-        );
+    uint32_t newVersion = doc["ver"] | 0UL;
+    if (newVersion <= currentAclVersion) return;
 
-    if (error) {
+    File dbFile = LittleFS.open("/database.tmp", FILE_WRITE);
+    if (!dbFile) { Serial.println("ERROR: ACL temp file unavailable."); return; }
 
-        Serial.println(
-            "ACL JSON parse failed."
-        );
-
-        return;
+    JsonArray cards = doc["cards"].as<JsonArray>();
+    for (JsonVariant card : cards) {
+        String uid = card["uid"].as<String>();
+        uid.trim(); uid.toUpperCase();
+        if (uid.length() > 0) dbFile.println(uid);
     }
+    dbFile.flush(); dbFile.close();
 
-    uint32_t newVersion =
-        doc["ver"] |
-        0UL;
-
-    if (
-        newVersion <=
-        currentAclVersion
-    ) {
-
-        Serial.println(
-            "ACL already up to date."
-        );
-
-        return;
-    }
-
-    File dbFile =
-        LittleFS.open(
-            "/database.tmp",
-            FILE_WRITE
-        );
-
-    if (!dbFile) {
-
-        Serial.println(
-            "ERROR: ACL temp file unavailable."
-        );
-
-        return;
-    }
-
-    JsonArray cards =
-        doc["cards"].as<JsonArray>();
-
-    for (
-        JsonVariant card :
-        cards
-    ) {
-
-        String uid =
-            card["uid"].as<String>();
-
-        uid.trim();
-        uid.toUpperCase();
-
-        if (
-            uid.length() > 0
-        ) {
-            dbFile.println(uid);
-        }
-    }
-
-    dbFile.flush();
-    dbFile.close();
-
-    // Replace old database only after
-    // the new one has been successfully written.
-    if (
-        LittleFS.exists(
-            "/database.txt"
-        )
-    ) {
-        LittleFS.remove(
-            "/database.txt"
-        );
-    }
-
-    if (
-        !LittleFS.rename(
-            "/database.tmp",
-            "/database.txt"
-        )
-    ) {
-
-        Serial.println(
-            "ERROR: ACL rename failed."
-        );
-
-        return;
-    }
+    if (LittleFS.exists("/database.txt")) LittleFS.remove("/database.txt");
+    if (!LittleFS.rename("/database.tmp", "/database.txt")) { Serial.println("ERROR: ACL rename failed."); return; }
 
     loadAclToRAM();
-
-    currentAclVersion =
-        newVersion;
-
-    // ACL version is not a per-event write,
-    // so this NVS write is acceptable.
-    preferences.putUInt(
-        "aclVer",
-        currentAclVersion
-    );
-
-    Serial.print(
-        "ACL updated to version "
-    );
-
-    Serial.println(
-        currentAclVersion
-    );
+    currentAclVersion = newVersion;
+    preferences.putUInt("aclVer", currentAclVersion);
+    Serial.printf("ACL updated to version %d\n", currentAclVersion);
 }
 
 // ============================================================
-// 29. EXIT BUTTON
+// 9. SENSORS & RFID
 // ============================================================
-
 void handleExitButton() {
-
-    const bool reading =
-        digitalRead(
-            EXIT_BUTTON_PIN
-        );
-
-    if (
-        reading !=
-        lastExitButtonState
-    ) {
-
-        lastExitDebounceTime =
-            millis();
-    }
-
-    if (
-        millis() -
-        lastExitDebounceTime >=
-        EXIT_DEBOUNCE_MS
-    ) {
-
-        if (
-            reading !=
-            stableExitButtonState
-        ) {
-
-            stableExitButtonState =
-                reading;
-
-            if (
-                stableExitButtonState ==
-                LOW
-            ) {
-
-                if (!isRelayActive) {
-
-                    DateTime now =
-                        rtc.now();
-
-                    // Manual OUT event.
-                    // No RFID card was used.
-                    const bool stored =
-                        logAccess(
-                            now,
-                            "00000000000000",
-                            DIR_OUT,
-                            RESULT_MANUAL
-                        );
-
-                    if (stored) {
-
-                        grantAccess();
-
-                        Serial.println(
-                            "EXIT BUTTON -> ACCESS GRANTED"
-                        );
-                    }
+    bool reading = digitalRead(EXIT_BUTTON_PIN);
+    if (reading != lastExitButtonState) lastExitDebounceTime = millis();
+    if (millis() - lastExitDebounceTime >= EXIT_DEBOUNCE_MS) {
+        if (reading != stableExitButtonState) {
+            stableExitButtonState = reading;
+            if (stableExitButtonState == LOW && !isRelayActive) {
+                if (logAccess(rtc.now(), "00000000000000", DIR_OUT, RESULT_MANUAL)) {
+                    grantAccess();
+                    Serial.println("EXIT BUTTON -> GRANTED");
                 }
             }
         }
     }
-
-    lastExitButtonState =
-        reading;
+    lastExitButtonState = reading;
 }
 
-// ============================================================
-// 30. RFID
-// ============================================================
-
 void handleRFID() {
-
-    if (
-        !rfid.PICC_IsNewCardPresent()
-    ) {
-        return;
-    }
-
-    if (
-        !rfid.PICC_ReadCardSerial()
-    ) {
-        return;
-    }
-
-    String scannedUID =
-        uidToString();
-
+    if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return;
+    String scannedUID = uidToString();
     rfid.PICC_HaltA();
     rfid.PCD_StopCrypto1();
 
-    const unsigned long nowMillis =
-        millis();
+    unsigned long nowMillis = millis();
+    if (scannedUID == lastScannedUID && nowMillis - lastScanTime < RFID_DEBOUNCE_MS) return;
 
-    // 5 second debounce
-    if (
-        scannedUID ==
-            lastScannedUID &&
-        nowMillis -
-            lastScanTime <
-            RFID_DEBOUNCE_MS
-    ) {
+    lastScannedUID = scannedUID;
+    lastScanTime = nowMillis;
+    Serial.println("RFID UID: " + scannedUID);
 
-        Serial.println(
-            "RFID debounce."
-        );
-
-        return;
-    }
-
-    lastScannedUID =
-        scannedUID;
-
-    lastScanTime =
-        nowMillis;
-
-    Serial.print(
-        "RFID UID: "
-    );
-
-    Serial.println(
-        scannedUID
-    );
-
-    DateTime now =
-        rtc.now();
-
-    const bool authorized =
-        isCardAuthorized(
-            scannedUID
-        );
-
-    if (authorized) {
-
-        const bool stored =
-            logAccess(
-                now,
-                scannedUID,
-                DIR_IN,
-                RESULT_GRANTED
-            );
-
-        if (stored) {
-
-            grantAccess();
-
-            Serial.println(
-                "ACCESS GRANTED"
-            );
-        }
-
-    } else {
-
-        const bool stored =
-            logAccess(
-                now,
-                scannedUID,
-                DIR_IN,
-                RESULT_UNKNOWN
-            );
-
-        if (stored) {
-
-            denyAccess();
-
-            Serial.println(
-                "ACCESS DENIED"
-            );
-        }
+    bool authorized = isCardAuthorized(scannedUID);
+    if (logAccess(rtc.now(), scannedUID, DIR_IN, authorized ? RESULT_GRANTED : RESULT_UNKNOWN)) {
+        authorized ? grantAccess() : denyAccess();
     }
 }
 
 // ============================================================
-// 31. RFID INITIALIZATION
+// 10. INITIALIZATION ROUTINES
 // ============================================================
-
 void initRFID() {
-
-    hspi.begin(
-        RFID_SCK_PIN,
-        RFID_MISO_PIN,
-        RFID_MOSI_PIN,
-        RFID_SS_PIN
-    );
-
+    hspi.begin(RFID_SCK_PIN, RFID_MISO_PIN, RFID_MOSI_PIN, RFID_SS_PIN);
     rfid.PCD_Init();
-
     delay(10);
-
-    Serial.print(
-        "MFRC522 firmware: 0x"
-    );
-
-    Serial.println(
-        (uint8_t)rfid.PCD_GetVersion(),
-        HEX
-    );
+    Serial.printf("MFRC522 firmware: 0x%02X\n", rfid.PCD_GetVersion());
 }
-
-// ============================================================
-// 32. RTC
-// ============================================================
 
 void initRTC() {
-
-    Wire.begin(
-        I2C_SDA_PIN,
-        I2C_SCL_PIN
-    );
-
-    if (!rtc.begin()) {
-
-        Serial.println(
-            "ERROR: PCF8563 not found."
-        );
-
-        currentTimeSource =
-            TSRC_INVALID;
-
-        return;
-    }
-
-    if (
-        rtc.lostPower()
-    ) {
-
-        Serial.println(
-            "RTC lost power."
-        );
-
-        rtc.adjust(
-            DateTime(
-                F(__DATE__),
-                F(__TIME__)
-            )
-        );
-
-        currentTimeSource =
-            TSRC_INVALID;
-
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+    if (!rtc.begin()) { Serial.println("ERROR: PCF8563 missing."); currentTimeSource = TSRC_INVALID; return; }
+    if (rtc.lostPower()) {
+        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+        currentTimeSource = TSRC_INVALID;
     } else {
-
-        currentTimeSource =
-            TSRC_RTC;
+        currentTimeSource = TSRC_RTC;
     }
 }
-
-// ============================================================
-// 33. FILE SYSTEM
-// ============================================================
 
 void initFileSystem() {
-
-    if (
-        !LittleFS.begin(true)
-    ) {
-
-        Serial.println(
-            "ERROR: LittleFS mount failed."
-        );
-
-        return;
+    if (!LittleFS.begin(true)) { Serial.println("ERROR: LittleFS mount failed."); return; }
+    if (!LittleFS.exists("/database.txt")) {
+        File file = LittleFS.open("/database.txt", FILE_WRITE);
+        if (file) { file.println("04A2B3C1D5E680"); file.close(); }
     }
-
-    if (
-        !LittleFS.exists(
-            "/database.txt"
-        )
-    ) {
-
-        File file =
-            LittleFS.open(
-                "/database.txt",
-                FILE_WRITE
-            );
-
-        if (file) {
-
-            // Test UID.
-            // Replace/remove for real deployment.
-            file.println(
-                "04A2B3C1D5E680"
-            );
-
-            file.close();
-        }
-    }
-
-    // Create queue file if missing.
-    if (
-        !LittleFS.exists(
-            EVENT_FILE
-        )
-    ) {
-
-        File file =
-            LittleFS.open(
-                EVENT_FILE,
-                FILE_WRITE
-            );
-
-        if (file) {
-            file.close();
-        }
-    }
+    if (!LittleFS.exists(EVENT_FILE)) { File file = LittleFS.open(EVENT_FILE, FILE_WRITE); if(file) file.close(); }
 }
-
-// ============================================================
-// 34. W5500
-// ============================================================
 
 void initEthernet() {
+    pinMode(W5500_RST_PIN, OUTPUT);
+    digitalWrite(W5500_RST_PIN, LOW); delay(2);
+    digitalWrite(W5500_RST_PIN, HIGH); delay(200);
 
-    pinMode(
-        W5500_RST_PIN,
-        OUTPUT
-    );
-
-    digitalWrite(
-        W5500_RST_PIN,
-        LOW
-    );
-
-    // W5500 reset pulse.
-    // This is initialization-only.
-    delay(2);
-
-    digitalWrite(
-        W5500_RST_PIN,
-        HIGH
-    );
-
-    delay(200);
-
-    // Global SPI on ESP32 is VSPI.
-    SPI.begin(
-        W5500_SCK_PIN,
-        W5500_MISO_PIN,
-        W5500_MOSI_PIN,
-        W5500_CS_PIN
-    );
-
-    Ethernet.init(
-        W5500_CS_PIN
-    );
-
-    // Static network configuration.
-    Ethernet.begin(
-        mac,
-        deviceIP,
-        dnsIP,
-        gatewayIP,
-        subnetMask
-    );
-
-    Serial.print(
-        "Ethernet IP: "
-    );
-
-    Serial.println(
-        Ethernet.localIP()
-    );
+    SPI.begin(W5500_SCK_PIN, W5500_MISO_PIN, W5500_MOSI_PIN, W5500_CS_PIN);
+    Ethernet.init(W5500_CS_PIN);
+    Ethernet.begin(mac, deviceIP, dnsIP, gatewayIP, subnetMask);
+    Serial.print("Ethernet IP: "); Serial.println(Ethernet.localIP());
 }
-
-// ============================================================
-// 35. NTP
-// ============================================================
-
-void updateTimeFromNTP() {
-
-    if (
-        !timeClient.isTimeSet()
-    ) {
-        return;
-    }
-
-    const unsigned long now =
-        millis();
-
-    if (
-        lastNtpSync == 0 ||
-        now - lastNtpSync >=
-            NTP_SYNC_INTERVAL_MS
-    ) {
-
-        rtc.adjust(
-            DateTime(
-                timeClient.getEpochTime()
-            )
-        );
-
-        currentTimeSource =
-            TSRC_NTP;
-
-        lastNtpSync =
-            now;
-
-        Serial.println(
-            "RTC synchronized from NTP."
-        );
-    }
-}
-
-// ============================================================
-// 36. MQTT SETUP
-// ============================================================
 
 void initMQTT() {
-
-    mqtt.begin(
-        mqttServer,
-        MQTT_PORT,
-        ethClient
-    );
-
-    mqtt.setOptions(
-        30,     // keepAlive seconds
-        false,  // cleanSession = false
-        1000    // command timeout
-    );
-
-    mqtt.onMessage(
-        mqttCallback
-    );
-
-    // LWT: offline
-    mqtt.setWill(
-        TOPIC_STATUS,
-        "offline",
-        true,
-        1
-    );
+    mqtt.begin(mqttServer, MQTT_PORT, ethClient);
+    mqtt.setOptions(30, false, 1000);
+    mqtt.onMessage(mqttCallback);
+    mqtt.setWill(TOPIC_STATUS, "offline", true, 1);
 }
 
 // ============================================================
-// 37. MQTT CONNECT
+// 11. NETWORK TASK (Core 0)
 // ============================================================
-
-bool connectMQTT() {
-
-    Serial.println(
-        "Connecting MQTT..."
-    );
-
-    if (
-        !mqtt.connect(
-            DEVICE_ID
-        )
-    ) {
-
-        Serial.println(
-            "MQTT connection failed."
-        );
-
-        return false;
-    }
-
-    Serial.println(
-        "MQTT connected."
-    );
-
-    // Online retained status
-    mqtt.publish(
-        TOPIC_STATUS,
-        "online",
-        true,
-        1
-    );
-
-    mqtt.subscribe(
-        TOPIC_EVENT_ACK,
-        1
-    );
-
-    mqtt.subscribe(
-        TOPIC_ACL,
-        1
-    );
-
-    return true;
-}
-
-// ============================================================
-// 38. NETWORK TASK
-// ============================================================
-
-void networkTaskCode(
-    void* parameter
-) {
+void networkTaskCode(void* parameter) {
+    esp_task_wdt_add(NULL); // Subscribe this task to the watchdog
 
     initEthernet();
-
     timeClient.begin();
-
     initMQTT();
 
-    unsigned long lastHeartbeat =
-        millis();
-
-    unsigned long lastReconnectAttempt =
-        0;
-
-    unsigned long backoff =
-        1000;
+    unsigned long lastHeartbeat = millis();
+    unsigned long lastReconnectAttempt = 0;
+    unsigned long backoff = 1000;
+    
+    // Store & Forward State Variables
+    bool waitingForAck = false;
+    unsigned long ackWaitStart = 0;
+    unsigned long lastPublishTime = 0;
 
     for (;;) {
-
-        const unsigned long now =
-            millis();
-
-        // ----------------------------------------------------
-        // Ethernet maintenance
-        // ----------------------------------------------------
-
+        esp_task_wdt_reset(); // Feed the watchdog
+        unsigned long now = millis();
         Ethernet.maintain();
 
-        if (
-            Ethernet.linkStatus() ==
-            LinkON
-        ) {
-
-            // ------------------------------------------------
-            // NTP
-            // ------------------------------------------------
-
+        if (Ethernet.linkStatus() == LinkON) {
             timeClient.update();
-
-            updateTimeFromNTP();
-
-            // ------------------------------------------------
-            // MQTT connection
-            // ------------------------------------------------
+            if (timeClient.isTimeSet() && (lastNtpSync == 0 || now - lastNtpSync >= NTP_SYNC_INTERVAL_MS)) {
+                rtc.adjust(DateTime(timeClient.getEpochTime()));
+                currentTimeSource = TSRC_NTP;
+                lastNtpSync = now;
+            }
 
             if (!mqtt.connected()) {
-
-                if (
-                    now -
-                    lastReconnectAttempt >=
-                    backoff
-                ) {
-
-                    if (
-                        connectMQTT()
-                    ) {
-
-                        backoff =
-                            1000;
-
+                if (now - lastReconnectAttempt >= backoff) {
+                    if (mqtt.connect(DEVICE_ID)) {
+                        backoff = 1000;
+                        mqtt.publish(TOPIC_STATUS, "online", true, 1);
+                        mqtt.subscribe(TOPIC_EVENT_ACK, 1);
+                        mqtt.subscribe(TOPIC_ACL, 1);
                     } else {
-
-                        backoff *= 2;
-
-                        if (
-                            backoff >
-                            60000
-                        ) {
-                            backoff =
-                                60000;
-                        }
+                        backoff = min(backoff * 2, 60000UL);
                     }
-
-                    lastReconnectAttempt =
-                        now;
+                    lastReconnectAttempt = now;
                 }
-
             } else {
-
-                // ------------------------------------------------
-                // MQTT loop
-                // ------------------------------------------------
-
                 mqtt.loop();
-
-                // Callback only stores ACK/ACL data.
-                processPendingAck();
-
+                waitingForAck = processPendingAck(waitingForAck);
                 processACLUpdate();
 
-                // ------------------------------------------------
                 // Heartbeat
-                // ------------------------------------------------
-
-                if (
-                    now -
-                    lastHeartbeat >=
-                    HEARTBEAT_INTERVAL_MS
-                ) {
-
+                if (now - lastHeartbeat >= HEARTBEAT_INTERVAL_MS) {
                     JsonDocument hb;
-
-                    hb["uptime"] =
-                        true;
-
-                    hb["queue"] =
-                        queueCount;
-
-                    hb["heap"] =
-                        ESP.getFreeHeap();
-
-                    hb["rssi"] =
-                        0;
-
-                    String payload;
-
-                    serializeJson(
-                        hb,
-                        payload
-                    );
-
-                    mqtt.publish(
-                        TOPIC_HEARTBEAT,
-                        payload,
-                        false,
-                        1
-                    );
-
-                    lastHeartbeat =
-                        now;
+                    hb["uptime"] = true; hb["queue"] = queueCount; 
+                    hb["heap"] = ESP.getFreeHeap(); hb["rssi"] = 0;
+                    String payload; serializeJson(hb, payload);
+                    mqtt.publish(TOPIC_HEARTBEAT, payload, false, 1);
+                    lastHeartbeat = now;
                 }
 
-                // ------------------------------------------------
-                // Store-and-forward
-                // ------------------------------------------------
-
-                if (
-                    !queueIsEmpty()
-                ) {
-
-                    publishQueueHead();
+                // Store-and-forward Processing with Timeout & Rate Limiting
+                if (!queueIsEmpty()) {
+                    if (waitingForAck) {
+                        if (now - ackWaitStart >= ACK_TIMEOUT_MS) waitingForAck = false; // Timeout reached, retry
+                    } else if (now - lastPublishTime >= PUBLISH_RATE_LIMIT_MS) {
+                        if (publishQueueHead()) {
+                            waitingForAck = true;
+                            ackWaitStart = now;
+                            lastPublishTime = now;
+                        }
+                    }
                 }
             }
         }
 
-        // ----------------------------------------------------
-        // Periodic NVS checkpoint even without MQTT
-        // ----------------------------------------------------
-
         saveCheckpoint(false);
-
-        // ----------------------------------------------------
-        // FreeRTOS delay
-        // ----------------------------------------------------
-
-        vTaskDelay(
-            25 /
-            portTICK_PERIOD_MS
-        );
+        vTaskDelay(25 / portTICK_PERIOD_MS);
     }
 }
 
 // ============================================================
-// 39. SETUP
+// 12. SETUP & LOOP (Core 1)
 // ============================================================
-
 void setup() {
-
-    Serial.begin(
-        115200
-    );
-
+    Serial.begin(115200);
     delay(1000);
+    
+    // Hardware Watchdog - 10 Seconds Timeout
+    esp_task_wdt_init(10, true);
+    esp_task_wdt_add(NULL);
 
-    Serial.println();
-    Serial.println(
-        "================================"
-    );
-    Serial.println(
-        "ESP32 PDKS GATE UNIT"
-    );
-    Serial.println(
-        "VSPI  -> W5500"
-    );
-    Serial.println(
-        "HSPI  -> MFRC522"
-    );
-    Serial.println(
-        "MQTT  -> QoS 1"
-    );
-    Serial.println(
-        "QUEUE -> LittleFS"
-    );
-    Serial.println(
-        "================================"
-    );
+    pinMode(RELAY_PIN, OUTPUT);
+    pinMode(BUZZER_PIN, OUTPUT);
+    pinMode(GREEN_LED_PIN, OUTPUT);
+    pinMode(RED_LED_PIN, OUTPUT);
+    pinMode(EXIT_BUTTON_PIN, INPUT); // Requires external 10k pull-up
 
-    // --------------------------------------------------------
-    // GPIO
-    // --------------------------------------------------------
-
-    pinMode(
-        RELAY_PIN,
-        OUTPUT
-    );
-
-    pinMode(
-        BUZZER_PIN,
-        OUTPUT
-    );
-
-    pinMode(
-        GREEN_LED_PIN,
-        OUTPUT
-    );
-
-    pinMode(
-        RED_LED_PIN,
-        OUTPUT
-    );
-
-    // GPIO35 has NO internal pull-up.
-    // External 10k pull-up to 3.3V is required.
-    pinMode(
-        EXIT_BUTTON_PIN,
-        INPUT
-    );
-
-    digitalWrite(
-        RELAY_PIN,
-        LOW
-    );
-
-    digitalWrite(
-        BUZZER_PIN,
-        LOW
-    );
-
-    digitalWrite(
-        GREEN_LED_PIN,
-        LOW
-    );
-
-    digitalWrite(
-        RED_LED_PIN,
-        LOW
-    );
-
-    // --------------------------------------------------------
-    // LittleFS
-    // --------------------------------------------------------
+    digitalWrite(RELAY_PIN, LOW);
+    digitalWrite(BUZZER_PIN, LOW);
+    digitalWrite(GREEN_LED_PIN, LOW);
+    digitalWrite(RED_LED_PIN, LOW);
 
     initFileSystem();
 
-    // --------------------------------------------------------
-    // NVS
-    // --------------------------------------------------------
+    preferences.begin("access_system", false);
+    readPointer = preferences.getUInt("readPtr", 0);
+    writePointer = preferences.getUInt("writePtr", 0);
+    globalSequence = preferences.getUInt("seq", 0);
+    currentAclVersion = preferences.getUInt("aclVer", 0);
 
-    preferences.begin(
-        "access_system",
-        false
-    );
-
-    readPointer =
-        preferences.getUInt(
-            "readPtr",
-            0
-        );
-
-    writePointer =
-        preferences.getUInt(
-            "writePtr",
-            0
-        );
-
-    globalSequence =
-        preferences.getUInt(
-            "seq",
-            0
-        );
-
-    currentAclVersion =
-        preferences.getUInt(
-            "aclVer",
-            0
-        );
-
-    if (
-        readPointer >= MAX_EVENTS
-    ) {
-        readPointer = 0;
-    }
-
-    if (
-        writePointer >= MAX_EVENTS
-    ) {
-        writePointer = 0;
-    }
-
-    // --------------------------------------------------------
-    // ACL
-    // --------------------------------------------------------
+    if (readPointer >= MAX_EVENTS) readPointer = 0;
+    if (writePointer >= MAX_EVENTS) writePointer = 0;
 
     loadAclToRAM();
-
-    // --------------------------------------------------------
-    // RTC
-    // --------------------------------------------------------
-
     initRTC();
-
-    // --------------------------------------------------------
-    // RFID / HSPI
-    // --------------------------------------------------------
-
     initRFID();
-
-    // --------------------------------------------------------
-    // Queue recovery
-    // --------------------------------------------------------
-
     rebuildQueueState();
 
-    // --------------------------------------------------------
-    // Network task
-    // --------------------------------------------------------
-
-    xTaskCreatePinnedToCore(
-        networkTaskCode,
-        "NetworkTask",
-        12000,
-        nullptr,
-        1,
-        &NetworkTask,
-        0
-    );
-
-    Serial.println(
-        "Setup complete."
-    );
+    xTaskCreatePinnedToCore(networkTaskCode, "NetworkTask", 12000, nullptr, 1, &NetworkTask, 0);
+    Serial.println("Setup complete.");
 }
 
-// ============================================================
-// 40. MAIN LOOP - CORE 1
-// ============================================================
-
 void loop() {
-
-    // Completely non-blocking hardware handling.
+    esp_task_wdt_reset(); // Feed the watchdog
     handleHardwareTimers();
-
     handleExitButton();
-
     handleRFID();
-
-    // Yield without introducing a meaningful blocking delay.
-    vTaskDelay(
-        1 /
-        portTICK_PERIOD_MS
-    );
+    vTaskDelay(1 / portTICK_PERIOD_MS);
 }
