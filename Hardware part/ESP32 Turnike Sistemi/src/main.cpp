@@ -118,7 +118,6 @@ EthernetUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
 EthernetClient ethClient;
 
-// Increased to 4096 bytes to safely handle retained ACL JSON payloads
 MQTTClient mqtt(4096);
 TaskHandle_t NetworkTask = nullptr;
 
@@ -143,6 +142,10 @@ uint32_t readPointer = 0, writePointer = 0, globalSequence = 0;
 uint32_t currentAclVersion = 0, queueCount = 0;
 uint32_t eventsSinceCheckpoint = 0, acksSinceCheckpoint = 0;
 std::vector<AclRecord> aclList;
+
+// FreeRTOS Synchronization
+portMUX_TYPE queueMux = portMUX_INITIALIZER_UNLOCKED;
+SemaphoreHandle_t aclMutex = NULL;
 
 // Helper comparator for sorting and binary search
 bool compareAclRecords(const AclRecord& a, const AclRecord& b) {
@@ -307,60 +310,75 @@ void loadAclToRAM() {
 
     size_t recordCount = fileSize / sizeof(AclRecord);
     aclList.reserve(recordCount); // Pre-allocate memory to prevent fragmentation
+    uint32_t loadedSize = 0;
+    // Take mutex and wait infinitely if network task is currently reading it
+    if (xSemaphoreTake(aclMutex, portMAX_DELAY) == pdTRUE) {
+        aclList.clear();
+        aclList.reserve(recordCount); 
 
-    AclRecord record;
-    while (file.read(reinterpret_cast<uint8_t*>(&record), sizeof(AclRecord)) == sizeof(AclRecord)) {
-        aclList.push_back(record);
-    }
-    
+        AclRecord record;
+        while (file.read(reinterpret_cast<uint8_t*>(&record), sizeof(AclRecord)) == sizeof(AclRecord)) {
+            aclList.push_back(record);
+        }
+        
+        std::sort(aclList.begin(), aclList.end(), compareAclRecords);
+        loadedSize = aclList.size();
+        
+        xSemaphoreGive(aclMutex);
+    }    
     file.close();
-
-    // Sort the vector by UID for fast binary searching later
-    std::sort(aclList.begin(), aclList.end(), compareAclRecords);
-    
-    Serial.printf("Binary ACL loaded: %d records\n", aclList.size());
-}
+    Serial.printf("Binary ACL loaded: %d records\n", loadedSize);
+  }
 
 uint8_t evaluateAccess(const uint8_t* scannedUid, uint8_t uidLen, const DateTime& now) {
-    
-    // Create a dummy record just for the binary search
     AclRecord target = {};
     memcpy(target.uid, scannedUid, uidLen);
     target.uidLen = uidLen;
 
-    auto it = std::lower_bound(aclList.begin(), aclList.end(), target, compareAclRecords);
-    
-    // 1. Is the card in the database?
-    if (it == aclList.end() || target.uidLen != it->uidLen || memcmp(target.uid, it->uid, target.uidLen) != 0) {
-        return RESULT_UNKNOWN;
+    uint8_t result = RESULT_UNKNOWN;
+
+    // Take mutex with a 100ms timeout so we don't block the hardware loop forever
+    if (xSemaphoreTake(aclMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        auto it = std::lower_bound(aclList.begin(), aclList.end(), target, compareAclRecords);
+        
+        if (it == aclList.end() || target.uidLen != it->uidLen || memcmp(target.uid, it->uid, target.uidLen) != 0) {
+            result = RESULT_UNKNOWN;
+        } else if (now.unixtime() > it->valid_to) {
+            result = RESULT_EXPIRED;
+        } else if ((it->floor_mask & (1UL << FLOOR_NUMBER)) == 0) {
+            result = RESULT_UNKNOWN; 
+        } else {
+            uint16_t current_minutes = (now.hour() * 60) + now.minute();
+            if (current_minutes < it->win_start_m || current_minutes >= it->win_end_m) {
+                result = RESULT_SCHEDULE;
+            } else {
+                result = RESULT_GRANTED;
+            }
+        }
+        xSemaphoreGive(aclMutex);
+    } else {
+        Serial.println("ERROR: Could not acquire ACL mutex.");
     }
 
-    // 2. Is the card expired?
-    if (now.unixtime() > it->valid_to) {
-        return RESULT_EXPIRED;
-    }
-
-    // 3. Is the card authorized for this floor? (Check the bitmask)
-    if ((it->floor_mask & (1UL << FLOOR_NUMBER)) == 0) {
-        return RESULT_UNKNOWN; // Or you could create a RESULT_WRONG_FLOOR
-    }
-
-    // 4. Is the card swiped within the allowed time window?
-    uint16_t current_minutes = (now.hour() * 60) + now.minute();
-    if (current_minutes < it->win_start_m || current_minutes >= it->win_end_m) {
-        return RESULT_SCHEDULE;
-    }
-
-    return RESULT_GRANTED;
+    return result;
 }
 
 // ============================================================
 // 7. QUEUE MANAGEMENT
 // ============================================================
 uint32_t queueDistance(uint32_t r, uint32_t w) { return (w >= r) ? w - r : (MAX_EVENTS - r + w); }
-bool queueIsFull() { return queueCount >= MAX_EVENTS; }
+bool queueIsFull() { 
+    portENTER_CRITICAL(&queueMux);
+    bool full = (queueCount >= MAX_EVENTS);
+    portEXIT_CRITICAL(&queueMux);
+    return full; 
+}
+
 bool queueIsEmpty() {
-    return queueCount == 0;
+    portENTER_CRITICAL(&queueMux);
+    bool empty = (queueCount == 0);
+    portEXIT_CRITICAL(&queueMux);
+    return empty;
 }
 
 File openEventFile(const char* mode) { return LittleFS.open(EVENT_FILE, mode); }
@@ -406,9 +424,13 @@ void rebuildQueueState() {
     globalSequence = max(globalSequence, newestSeq);
     if (readPointer >= MAX_EVENTS) readPointer = 0;
     
+    portENTER_CRITICAL(&queueMux);
     queueCount = queueDistance(readPointer, writePointer);
     if (queueCount > MAX_EVENTS) queueCount = validCount;
-    Serial.printf("Queue rebuilt. read=%d write=%d count=%d\n", readPointer, writePointer, queueCount);
+    uint32_t safeQueueCount = queueCount; // Local copy for printing
+    portEXIT_CRITICAL(&queueMux);
+    
+    Serial.printf("Queue rebuilt. read=%d write=%d count=%d\n", readPointer, writePointer, safeQueueCount);
 }
 
 void saveCheckpoint(bool force = false) {
@@ -442,7 +464,9 @@ bool logAccess(const DateTime& now, const String& scannedUID, uint8_t direction,
     }
 
     writePointer = (writePointer + 1) % MAX_EVENTS;
+    portENTER_CRITICAL(&queueMux);
     queueCount++;
+    portEXIT_CRITICAL(&queueMux);
     eventsSinceCheckpoint++;
     Serial.printf("EVENT STORED seq=%d\n", record.seq);
     saveCheckpoint(false);
@@ -475,7 +499,9 @@ bool processPendingAck(bool currentlyWaiting) {
 
     if (record.seq == pendingAckSeq) {
         readPointer = (readPointer + 1) % MAX_EVENTS;
+        portENTER_CRITICAL(&queueMux);
         if (queueCount > 0) queueCount--;
+        portEXIT_CRITICAL(&queueMux);
         acksSinceCheckpoint++;
         Serial.printf("ACK accepted seq=%d\n", pendingAckSeq);
         saveCheckpoint(false);
@@ -601,6 +627,10 @@ void handleExitButton() {
                 if (logAccess(rtc.now(), "00000000000000", DIR_OUT, RESULT_MANUAL)) {
                     grantAccess();
                     Serial.println("EXIT BUTTON -> GRANTED");
+                } else {
+                    // Provide physical feedback if logging fails
+                    denyAccess();
+                    Serial.println("SYSTEM ERROR: Exit button logging failed.");
                 }
             }
         }
@@ -611,10 +641,8 @@ void handleExitButton() {
 void handleRFID() {
     if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return;
     
-    // We still need the string version for the MQTT payload and logging
     String scannedUID = uidToString();
     
-    // Extract raw bytes for the high-speed binary evaluator
     uint8_t uidLen = rfid.uid.size;
     uint8_t uidBytes[7];
     memset(uidBytes, 0, sizeof(uidBytes));
@@ -630,16 +658,18 @@ void handleRFID() {
     lastScanTime = nowMillis;
     Serial.println("RFID UID: " + scannedUID);
 
-    // Pass raw bytes and RTC time to the evaluator
     uint8_t resultCode = evaluateAccess(uidBytes, uidLen, rtc.now());
     
-    // Log the specific ResultCode (GRANTED, EXPIRED, SCHEDULE, etc.)
     if (logAccess(rtc.now(), scannedUID, DIR_IN, resultCode)) {
         if (resultCode == RESULT_GRANTED) {
             grantAccess();
         } else {
             denyAccess();
         }
+    } else {
+        // Provide physical feedback if the queue is full or FS fails
+        denyAccess();
+        Serial.println("SYSTEM ERROR: User denied due to logging failure.");
     }
 }
 
@@ -699,6 +729,9 @@ void initMQTT() {
 // ============================================================
 // 11. NETWORK TASK (Core 0)
 // ============================================================
+// ============================================================
+// 11. NETWORK TASK (Core 0)
+// ============================================================
 void networkTaskCode(void* parameter) {
     esp_task_wdt_add(NULL); // Subscribe this task to the watchdog
 
@@ -748,10 +781,18 @@ void networkTaskCode(void* parameter) {
                 // Heartbeat
                 if (now - lastHeartbeat >= HEARTBEAT_INTERVAL_MS) {
                     JsonDocument hb;
-                    hb["uptime"] = true; hb["queue"] = queueCount; 
-                    hb["heap"] = ESP.getFreeHeap(); hb["rssi"] = 0;
-                    String payload; serializeJson(hb, payload);
-                    mqtt.publish(TOPIC_HEARTBEAT, payload, false, 0);
+                    hb["uptime"] = millis() / 1000; 
+                    
+                    portENTER_CRITICAL(&queueMux);
+                    hb["queue"] = queueCount; 
+                    portEXIT_CRITICAL(&queueMux);
+                    
+                    hb["heap"] = ESP.getFreeHeap(); 
+                    hb["rssi"] = 0;
+
+                    String payload; 
+                    serializeJson(hb, payload);
+                    mqtt.publish(TOPIC_HEARTBEAT, payload, false, 0); // QoS 0 as required
                     lastHeartbeat = now;
                 }
 
@@ -768,13 +809,15 @@ void networkTaskCode(void* parameter) {
                     }
                 }
             }
+        } else {
+            // Revert to RTC tracking if network link is physically down
+            currentTimeSource = TSRC_RTC;
         }
 
         saveCheckpoint(false);
         vTaskDelay(25 / portTICK_PERIOD_MS);
     }
 }
-
 // ============================================================
 // 12. SETUP & LOOP (Core 1)
 // ============================================================
@@ -808,6 +851,9 @@ void setup() {
     if (readPointer >= MAX_EVENTS) readPointer = 0;
     if (writePointer >= MAX_EVENTS) writePointer = 0;
 
+    // Initialize the ACL Mutex
+    aclMutex = xSemaphoreCreateMutex();
+
     loadAclToRAM();
     initRTC();
     initRFID();
@@ -823,4 +869,4 @@ void loop() {
     handleExitButton();
     handleRFID();
     vTaskDelay(1 / portTICK_PERIOD_MS);
-}
+} 
