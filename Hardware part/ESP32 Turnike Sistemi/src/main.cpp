@@ -299,7 +299,9 @@ bool isCardAuthorized(String uid) {
 // ============================================================
 uint32_t queueDistance(uint32_t r, uint32_t w) { return (w >= r) ? w - r : (MAX_EVENTS - r + w); }
 bool queueIsFull() { return queueCount >= MAX_EVENTS; }
-bool queueIsEmpty() { return readPointer == writePointer; }
+bool queueIsEmpty() {
+    return queueCount == 0;
+}
 
 File openEventFile(const char* mode) { return LittleFS.open(EVENT_FILE, mode); }
 
