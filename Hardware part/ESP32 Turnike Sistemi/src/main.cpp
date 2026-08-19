@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <MQTT.h>
 #include <esp_task_wdt.h>
+#include <esp_system.h>
 
 #include <MFRC522v2.h>
 #include <MFRC522DriverSPI.h>
@@ -409,12 +410,23 @@ void rebuildQueueState() {
     int newestIndex = -1;
     uint32_t validCount = 0;
 
-    for (uint32_t i = 0; i < MAX_EVENTS; i++) {
-        AccessRecord record;
-        if (!readEventRecord(i, record) || !isRecordValid(record)) continue;
-        validCount++;
-        if (record.seq > newestSeq) { newestSeq = record.seq; newestIndex = static_cast<int>(i); }
+    File file = openEventFile(FILE_READ);
+    if (!file) {
+        readPointer = 0; writePointer = 0; queueCount = 0;
+        return;
     }
+
+    AccessRecord record;
+    uint32_t i = 0;
+    while (file.read(reinterpret_cast<uint8_t*>(&record), sizeof(record)) == sizeof(record)) {
+        if (isRecordValid(record)) {
+            validCount++;
+            if (record.seq > newestSeq) { newestSeq = record.seq; newestIndex = static_cast<int>(i); }
+        }
+        i++;
+        if ((i & 0x3FF) == 0) esp_task_wdt_reset(); // her 1024 kayıtta bir watchdog'u besle
+    }
+    file.close();
 
     if (newestIndex < 0) {
         readPointer = 0; writePointer = 0; queueCount = 0; return;
@@ -423,13 +435,13 @@ void rebuildQueueState() {
     writePointer = (static_cast<uint32_t>(newestIndex) + 1) % MAX_EVENTS;
     globalSequence = max(globalSequence, newestSeq);
     if (readPointer >= MAX_EVENTS) readPointer = 0;
-    
+
     portENTER_CRITICAL(&queueMux);
     queueCount = queueDistance(readPointer, writePointer);
     if (queueCount > MAX_EVENTS) queueCount = validCount;
-    uint32_t safeQueueCount = queueCount; // Local copy for printing
+    uint32_t safeQueueCount = queueCount;
     portEXIT_CRITICAL(&queueMux);
-    
+
     Serial.printf("Queue rebuilt. read=%d write=%d count=%d\n", readPointer, writePointer, safeQueueCount);
 }
 
@@ -824,6 +836,9 @@ void networkTaskCode(void* parameter) {
 void setup() {
     Serial.begin(115200);
     delay(1000);
+
+    Serial.printf("Reset reason: %d\n", esp_reset_reason());
+    // ESP_RST_BROWNOUT = 8 → brownout
     
     // Hardware Watchdog - 10 Seconds Timeout
     esp_task_wdt_init(10, true);
