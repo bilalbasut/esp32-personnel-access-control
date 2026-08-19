@@ -727,6 +727,9 @@ void initEthernet() {
 
     SPI.begin(W5500_SCK_PIN, W5500_MISO_PIN, W5500_MOSI_PIN, W5500_CS_PIN);
     Ethernet.init(W5500_CS_PIN);
+    if (Ethernet.hardwareStatus() == EthernetNoHardware) {
+    Serial.println("FATAL ERROR: W5500 module was not found. Check wiring!");
+}
     Ethernet.begin(mac, deviceIP, dnsIP, gatewayIP, subnetMask);
     Serial.print("Ethernet IP: "); Serial.println(Ethernet.localIP());
 }
