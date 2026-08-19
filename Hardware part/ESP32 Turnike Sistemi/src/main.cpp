@@ -721,17 +721,98 @@ void initFileSystem() {
 }
 
 void initEthernet() {
-    pinMode(W5500_RST_PIN, OUTPUT);
-    digitalWrite(W5500_RST_PIN, LOW); delay(2);
-    digitalWrite(W5500_RST_PIN, HIGH); delay(200);
+    Serial.println("=== W5500 INIT ===");
 
-    SPI.begin(W5500_SCK_PIN, W5500_MISO_PIN, W5500_MOSI_PIN, W5500_CS_PIN);
-    Ethernet.init(W5500_CS_PIN);
-    if (Ethernet.hardwareStatus() == EthernetNoHardware) {
-    Serial.println("FATAL ERROR: W5500 module was not found. Check wiring!");
-}
-    Ethernet.begin(mac, deviceIP, dnsIP, gatewayIP, subnetMask);
-    Serial.print("Ethernet IP: "); Serial.println(Ethernet.localIP());
+    pinMode(W5500_RST_PIN, OUTPUT);
+
+    digitalWrite(W5500_RST_PIN, LOW);
+    delay(100);
+
+    digitalWrite(W5500_RST_PIN, HIGH);
+    delay(500);
+
+    Serial.println("Starting VSPI...");
+
+    SPI.begin(
+        W5500_SCK_PIN,
+        W5500_MISO_PIN,
+        W5500_MOSI_PIN,
+        W5500_CS_PIN
+    );
+
+    pinMode(
+        W5500_CS_PIN,
+        OUTPUT
+    );
+
+    digitalWrite(
+        W5500_CS_PIN,
+        HIGH
+    );
+
+    Ethernet.init(
+        W5500_CS_PIN
+    );
+
+    Serial.println("Calling Ethernet.begin()...");
+
+    Ethernet.begin(
+        mac,
+        deviceIP,
+        dnsIP,
+        gatewayIP,
+        subnetMask
+    );
+
+    EthernetHardwareStatus hw =
+        Ethernet.hardwareStatus();
+
+    Serial.print("Hardware status: ");
+
+    switch (hw) {
+
+        case EthernetW5500:
+            Serial.println("W5500 DETECTED");
+            break;
+
+        case EthernetW5100:
+            Serial.println("W5100 DETECTED");
+            break;
+
+        case EthernetW5200:
+            Serial.println("W5200 DETECTED");
+            break;
+
+        default:
+            Serial.println("NO ETHERNET HARDWARE");
+            break;
+    }
+
+    Serial.print("Link status: ");
+
+    switch (Ethernet.linkStatus()) {
+
+        case LinkON:
+            Serial.println("LINK ON");
+            break;
+
+        case LinkOFF:
+            Serial.println("LINK OFF");
+            break;
+
+        default:
+            Serial.println("LINK UNKNOWN");
+            break;
+    }
+
+    Serial.print("IP: ");
+    Serial.println(Ethernet.localIP());
+
+    Serial.print("Gateway: ");
+    Serial.println(Ethernet.gatewayIP());
+
+    Serial.print("Subnet: ");
+    Serial.println(Ethernet.subnetMask());
 }
 
 void initMQTT() {
