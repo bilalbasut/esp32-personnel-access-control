@@ -3,28 +3,30 @@ import { useState, useEffect } from 'react';
 function App() {
   const [events, setEvents] = useState([]);
   const [devices, setDevices] = useState([]);
+  const [currentTime, setCurrentTime] = useState(Math.floor(Date.now() / 1000)); 
   const [formData, setFormData] = useState({
     ad_soyad: '', departman: '', uid: '', floors: '1,2,3'
   });
 
-  // Fetch data from your Node.js API
-  const fetchData = async () => {
+  // Fetch logic for manual triggers (like submitting the form)
+  const fetchLatest = async () => {
     try {
       const eventRes = await fetch('/api/events');
-      setEvents(await eventRes.json());
-      
       const devRes = await fetch('/api/devices');
+      
+      setEvents(await eventRes.json());
       setDevices(await devRes.json());
+      setCurrentTime(Math.floor(Date.now() / 1000));
     } catch (err) {
-      console.error("Failed to fetch data", err);
+      console.error("Failed to fetch manual data", err);
     }
   };
 
-// Fetch data and Poll API every 3 seconds
+  // 2. Wrap the fetch inside an explicitly async function to satisfy the strict Effect linter
   useEffect(() => {
-    let isMounted = true; // Tracks if the component is still on the screen
-
-    const fetchData = async () => {
+    let isMounted = true;
+    
+    const pollData = async () => {
       try {
         const eventRes = await fetch('/api/events');
         const eventData = await eventRes.json();
@@ -32,20 +34,22 @@ function App() {
         const devRes = await fetch('/api/devices');
         const devData = await devRes.json();
 
-        // Only update the state if the component hasn't been unmounted
         if (isMounted) {
           setEvents(eventData);
           setDevices(devData);
+          setCurrentTime(Math.floor(Date.now() / 1000)); // Safely update time in the background
         }
       } catch (err) {
-        console.error("Failed to fetch data", err);
+        console.error("Failed to poll data", err);
       }
     };
 
-    fetchData(); // Initial load
-    const interval = setInterval(fetchData, 3000); // Start polling
+    pollData(); // Trigger async execution
 
-    // Cleanup function: clears the interval and prevents rogue state updates
+    const interval = setInterval(() => {
+      pollData();
+    }, 3000);
+
     return () => {
       isMounted = false; 
       clearInterval(interval);
@@ -58,7 +62,7 @@ function App() {
     const payload = {
       ...formData,
       valid_from: Math.floor(Date.now() / 1000),
-      valid_to: Math.floor(Date.now() / 1000) + (31536000 * 5) // Valid for 5 years
+      valid_to: Math.floor(Date.now() / 1000) + (31536000 * 5) 
     };
 
     const res = await fetch('/api/cards/add', {
@@ -70,7 +74,19 @@ function App() {
     if (res.ok) {
       alert('Card Added and Hardware Synced!');
       setFormData({ ad_soyad: '', departman: '', uid: '', floors: '1,2,3' });
-      fetchData(); // Immediately refresh the tables
+      fetchLatest(); 
+    }
+  };
+
+  // Helper to decode ESP32 Result Codes
+  const getResultBadge = (code) => {
+    switch (code) {
+      case 0: return <span className="badge bg-success">Granted</span>;
+      case 1: return <span className="badge bg-danger">Denied (Unknown Card)</span>;
+      case 2: return <span className="badge bg-warning text-dark">Denied (Expired)</span>;
+      case 3: return <span className="badge bg-warning text-dark">Denied (Out of Schedule)</span>;
+      case 4: return <span className="badge bg-info text-dark">Manual (Exit Button)</span>;
+      default: return <span className="badge bg-secondary">Unknown Error</span>;
     }
   };
 
@@ -111,15 +127,23 @@ function App() {
           <div className="card shadow-sm mb-4">
             <div className="card-header bg-secondary text-white">Device Fleet Status</div>
             <table className="table mb-0">
-              <thead><tr><th>Device ID</th><th>Status</th></tr></thead>
+              <thead><tr><th>Device ID</th><th>Status</th><th>Last Seen</th></tr></thead>
               <tbody>
-                {devices.length === 0 ? <tr><td colSpan="2" className="text-center text-muted">No devices found</td></tr> : null}
-                {devices.map(dev => (
-                  <tr key={dev.id}>
-                    <td><strong>{dev.id}</strong></td>
-                    <td>{dev.durum === 'online' ? '🟢 Online' : '🔴 Offline'}</td>
-                  </tr>
-                ))}
+                {devices.length === 0 ? <tr><td colSpan="3" className="text-center text-muted">No devices found</td></tr> : null}
+                {devices.map(dev => {
+                  const isOnline = dev.durum === 'online';
+                  // 3. We now use the pure `currentTime` state instead of Date.now()
+                  const isDead = (currentTime - dev.son_gorulme) > 60; 
+                  return (
+                    <tr key={dev.id}>
+                      <td><strong>{dev.id}</strong></td>
+                      <td>
+                        {isOnline && !isDead ? '🟢 Online' : '🔴 Offline'}
+                      </td>
+                      <td className="text-muted">{new Date(dev.son_gorulme * 1000).toLocaleTimeString()}</td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
@@ -127,20 +151,31 @@ function App() {
           <div className="card shadow-sm">
             <div className="card-header bg-success text-white">Live Access Logs</div>
             <div className="table-responsive" style={{ maxHeight: '400px', overflowY: 'auto' }}>
-              <table className="table mb-0">
+              <table className="table mb-0 align-middle">
                 <thead className="table-light" style={{ position: 'sticky', top: 0 }}>
-                  <tr><th>Time</th><th>Employee</th><th>Device</th><th>Result</th></tr>
+                  <tr>
+                    <th>Time</th>
+                    <th>Dir</th>
+                    <th>Employee</th>
+                    <th>Device</th>
+                    <th>Result</th>
+                  </tr>
                 </thead>
                 <tbody>
-                  {events.length === 0 ? <tr><td colSpan="4" className="text-center text-muted">No logs yet</td></tr> : null}
+                  {events.length === 0 ? <tr><td colSpan="5" className="text-center text-muted">No logs yet</td></tr> : null}
                   {events.map((ev, idx) => (
                     <tr key={idx}>
-                      <td>{new Date(ev.ts_utc * 1000).toLocaleTimeString()}</td>
-                      <td>{ev.ad_soyad || 'Unknown'}</td>
-                      <td>{ev.device_id}</td>
                       <td>
-                        {ev.result === 0 ? <span className="badge bg-success">Granted</span> : <span className="badge bg-danger">Denied</span>}
+                        {new Date(ev.ts_utc * 1000).toLocaleTimeString()}
+                        {ev.mode === 1 && <span title="Scanned while hardware was offline"> ⚡</span>}
                       </td>
+                      <td>{ev.dir === 0 ? '⬇️ IN' : '⬆️ OUT'}</td>
+                      <td>
+                        {ev.ad_soyad || <span className="text-muted">Unregistered Card</span>}<br/>
+                        <small className="text-muted">{ev.uid}</small>
+                      </td>
+                      <td>{ev.device_id}</td>
+                      <td>{getResultBadge(ev.result)}</td>
                     </tr>
                   ))}
                 </tbody>

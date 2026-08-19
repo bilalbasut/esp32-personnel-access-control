@@ -9,6 +9,13 @@ const pool = new Pool({
     port: process.env.DB_PORT,
 });
 
+// Without this, a dropped/idle connection error crashes the whole process
+// (node-postgres emits 'error' on the pool for background connection
+// failures - an unhandled 'error' event throws in Node).
+pool.on('error', (err) => {
+    console.error('Unexpected error on idle PostgreSQL client:', err.message);
+});
+
 const initDB = async () => {
     const schema = `
         CREATE TABLE IF NOT EXISTS employees (
@@ -24,6 +31,8 @@ const initDB = async () => {
             floors VARCHAR(100),
             valid_from BIGINT,
             valid_to BIGINT,
+            win_start_m SMALLINT DEFAULT 0,
+            win_end_m SMALLINT DEFAULT 1440,
             aktif SMALLINT DEFAULT 1
         );
 
@@ -50,16 +59,27 @@ const initDB = async () => {
             alindi_at BIGINT,
             UNIQUE(device_id, seq)
         );
+
+        -- CREATE TABLE IF NOT EXISTS is a no-op on tables that already exist,
+        -- so anyone who ran an earlier version of this schema needs these
+        -- columns added explicitly, or "win_start_m"/"win_end_m" will simply
+        -- never appear and server.js's ACL query will fail.
+        ALTER TABLE cards ADD COLUMN IF NOT EXISTS win_start_m SMALLINT DEFAULT 0;
+        ALTER TABLE cards ADD COLUMN IF NOT EXISTS win_end_m SMALLINT DEFAULT 1440;
     `;
-    
+
     try {
         await pool.query(schema);
-        console.log("PostgreSQL schema initialized successfully.");
+        console.log('PostgreSQL schema initialized successfully.');
     } catch (err) {
-        console.error("Error initializing PostgreSQL schema:", err);
+        console.error('Error initializing PostgreSQL schema:', err);
+        throw err;
     }
 };
 
-initDB();
+// Exported so callers (server.js, collector.js) can wait for the schema to
+// exist before running their first query, instead of racing it.
+const ready = initDB();
 
 module.exports = pool;
+module.exports.ready = ready;
