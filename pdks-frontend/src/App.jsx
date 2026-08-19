@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react';
 function App() {
   const [events, setEvents] = useState([]);
   const [devices, setDevices] = useState([]);
-  const [currentTime, setCurrentTime] = useState(Math.floor(Date.now() / 1000)); 
+  const [currentTime, setCurrentTime] = useState(() => Math.floor(Date.now() / 1000));
   const [formData, setFormData] = useState({
     ad_soyad: '', departman: '', uid: '', floors: '1,2,3'
   });
