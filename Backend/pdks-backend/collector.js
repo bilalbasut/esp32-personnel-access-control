@@ -1,10 +1,8 @@
 const mqtt = require('mqtt');
 const pool = require('./db');
 
-const client = mqtt.connect('mqtt://127.0.0.1:1883', {
-    clientId: 'pdks-server-collector',
-    clean: false
-});
+const mqttHost = process.env.MQTT_HOST || '127.0.0.1';
+const client = mqtt.connect(`mqtt://${mqttHost}:1883`);
 
 client.on('connect', () => {
     console.log('Collector connected to Mosquitto MQTT Broker');

@@ -124,11 +124,11 @@ TaskHandle_t NetworkTask = nullptr;
 
 // Network Config
 byte mac[] = { 0x00, 0x1A, 0x2B, 0x3C, 0x4D, 0x5E };
-IPAddress deviceIP(192, 168, 1, 50);
-IPAddress dnsIP(192, 168, 1, 1);
-IPAddress gatewayIP(192, 168, 1, 1);
+IPAddress deviceIP(192, 168, 10, 50);
+IPAddress dnsIP(192, 168, 10, 1);
+IPAddress gatewayIP(192, 168, 10, 1);
 IPAddress subnetMask(255, 255, 255, 0);
-IPAddress mqttServer(192, 168, 1, 100);
+IPAddress mqttServer(192, 168, 10, 164);
 const uint16_t MQTT_PORT = 1883;
 
 // Topics

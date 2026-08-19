@@ -7,7 +7,8 @@ const app = express();
 app.use(express.json());
 app.use(express.static('public'));
 
-const mqttClient = mqtt.connect('mqtt://127.0.0.1:1883');
+const mqttHost = process.env.MQTT_HOST || '127.0.0.1';
+const client = mqtt.connect(`mqtt://${mqttHost}:1883`);
 
 // --- HELPER FUNCTION: AUTOMATED ACL PUBLISHER ---
 // This builds the JSON payload and pushes it to the broker
@@ -17,9 +18,6 @@ const publishAclUpdate = async () => {
         const result = await pool.query('SELECT uid FROM cards WHERE aktif = 1');
         const activeCards = result.rows; 
         
-        // 2. The Engineering Trick: Use the Unix epoch timestamp as the version number. 
-        // This guarantees the version is always larger than the ESP32's current version 
-        // without needing to store a separate version counter in the database.
         const newVersion = Math.floor(Date.now() / 1000); 
 
         const aclPayload = JSON.stringify({
