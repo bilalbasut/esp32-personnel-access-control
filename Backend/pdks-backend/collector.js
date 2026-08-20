@@ -40,6 +40,21 @@ client.on('message', async (topic, message) => {
         }
 
         const now = Math.floor(Date.now() / 1000);
+
+        // Opportunistic presence/firmware tracking - "fw" only ever appears on
+        // event payloads, never on heartbeats, so this is the only place it can
+        // be captured. Runs regardless of whether the insert below turns out to
+        // be a duplicate, since it's just presence + version, not the event itself.
+        try {
+            await pool.query(
+                `INSERT INTO devices (id, durum, son_gorulme, fw)
+                 VALUES ($1, 'online', $2, $3)
+                 ON CONFLICT(id) DO UPDATE SET durum = 'online', son_gorulme = EXCLUDED.son_gorulme, fw = EXCLUDED.fw`,
+                [deviceId, now, data.fw || null]
+            );
+        } catch (err) {
+            console.error('Device fw/presence update error:', err);
+        }
         
         // Translate strings to integers (defaulting to safe values if undefined)
         const resInt = mapResult[data.res] ?? 1; // Default: 1 (unknown)
@@ -100,13 +115,35 @@ client.on('message', async (topic, message) => {
     // --- Process Heartbeats (hb) ---
     else if (topic.endsWith('/hb')) {
         const now = Math.floor(Date.now() / 1000);
+        let hb = {};
+        try {
+            hb = JSON.parse(payload);
+        } catch (e) {
+            console.error('Invalid heartbeat JSON, storing presence only.');
+        }
+
+        // Upsert (not a blind UPDATE) so a heartbeat that happens to arrive
+        // before this device's first /status message doesn't just silently
+        // touch zero rows and lose the data.
         const query = `
-            UPDATE devices 
-            SET son_gorulme = $1, durum = 'online'
-            WHERE id = $2
+            INSERT INTO devices (id, durum, son_gorulme, queue_depth, heap_free, queue_overflow, uptime_s)
+            VALUES ($1, 'online', $2, $3, $4, $5, $6)
+            ON CONFLICT(id) DO UPDATE SET
+                durum = 'online',
+                son_gorulme = EXCLUDED.son_gorulme,
+                queue_depth = EXCLUDED.queue_depth,
+                heap_free = EXCLUDED.heap_free,
+                queue_overflow = EXCLUDED.queue_overflow,
+                uptime_s = EXCLUDED.uptime_s
         `;
         try {
-            await pool.query(query, [now, deviceId]);
+            await pool.query(query, [
+                deviceId, now,
+                hb.queue ?? null,
+                hb.heap ?? null,
+                hb.qOverflow ?? null,
+                hb.uptime ?? null,
+            ]);
         } catch (err) {
             console.error('Heartbeat update error:', err);
         }
