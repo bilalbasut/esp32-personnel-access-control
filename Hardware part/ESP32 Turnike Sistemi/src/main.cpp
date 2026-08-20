@@ -297,8 +297,6 @@ void handleHardwareTimers() {
 // 6. ACL & FILE SYSTEM
 // ============================================================
 void loadAclToRAM() {
-    aclList.clear();
-    
     // Switch to binary file
     File file = LittleFS.open("/database.bin", FILE_READ);
     if (!file) { 
@@ -310,28 +308,39 @@ void loadAclToRAM() {
     if (fileSize % sizeof(AclRecord) != 0) {
         Serial.println("WARNING: database.bin size is not a multiple of AclRecord size.");
     }
-
     size_t recordCount = fileSize / sizeof(AclRecord);
-    aclList.reserve(recordCount); // Pre-allocate memory to prevent fragmentation
-    uint32_t loadedSize = 0;
-    // Take mutex and wait infinitely if network task is currently reading it
-    if (xSemaphoreTake(aclMutex, portMAX_DELAY) == pdTRUE) {
-        aclList.clear();
-        aclList.reserve(recordCount); 
 
-        AclRecord record;
-        while (file.read(reinterpret_cast<uint8_t*>(&record), sizeof(AclRecord)) == sizeof(AclRecord)) {
-            aclList.push_back(record);
-        }
-        
-        std::sort(aclList.begin(), aclList.end(), compareAclRecords);
-        loadedSize = aclList.size();
-        
-        xSemaphoreGive(aclMutex);
-    }    
+    // Build the new list off to the side, without touching the shared aclList or
+    // holding aclMutex at all. File I/O + sort can take a noticeable amount of time
+    // once the card list grows, and evaluateAccess() (RFID hot path, core 1) only
+    // waits 100ms for the mutex before treating a legitimate card as "unknown".
+    // Holding the mutex for the whole reload risked spuriously denying a real
+    // cardholder mid-reload.
+    std::vector<AclRecord> newList;
+    newList.reserve(recordCount); // Pre-allocate memory to prevent fragmentation
+
+    AclRecord record;
+    while (file.read(reinterpret_cast<uint8_t*>(&record), sizeof(AclRecord)) == sizeof(AclRecord)) {
+        newList.push_back(record);
+    }
     file.close();
-    Serial.printf("Binary ACL loaded: %d records\n", loadedSize);
-  }
+
+    std::sort(newList.begin(), newList.end(), compareAclRecords);
+
+    // The actual swap-in is just an exchange of a few pointers/sizes on the vector
+    // (O(1)), so the critical section is now genuinely tiny - evaluateAccess() will
+    // never see a multi-millisecond stall waiting on this mutex.
+    if (xSemaphoreTake(aclMutex, portMAX_DELAY) == pdTRUE) {
+        aclList.swap(newList);
+        xSemaphoreGive(aclMutex);
+    } else {
+        Serial.println("ERROR: Could not acquire ACL mutex to swap in new list.");
+        return;
+    }
+    // newList now holds the old data (or is empty on first load) and is freed here.
+
+    Serial.printf("Binary ACL loaded: %d records\n", aclList.size());
+}
 
 uint8_t evaluateAccess(const uint8_t* scannedUid, uint8_t uidLen, const DateTime& now) {
     AclRecord target = {};
@@ -854,9 +863,6 @@ void initMQTT() {
 // ============================================================
 // 11. NETWORK TASK (Core 0)
 // ============================================================
-// ============================================================
-// 11. NETWORK TASK (Core 0)
-// ============================================================
 void networkTaskCode(void* parameter) {
     esp_task_wdt_add(NULL); // Subscribe this task to the watchdog
 
@@ -895,6 +901,7 @@ void networkTaskCode(void* parameter) {
                         mqtt.subscribe(TOPIC_ACL, 1);
                     } else {
                         backoff = min(backoff * 2, 60000UL);
+                        backoff += random(0, 1000); // jitter, avoids synchronized reconnect storms across gate units
                     }
                     lastReconnectAttempt = now;
                 }
