@@ -163,7 +163,8 @@ uint8_t denyBeepCount = 0;
 bool denyLedState = false;
 bool lastExitButtonState = HIGH, stableExitButtonState = HIGH;
 unsigned long lastExitDebounceTime = 0;
-String lastScannedUID = "";
+uint8_t lastUid[7] = {0};
+uint8_t lastUidLen = 0;
 unsigned long lastScanTime = 0;
 
 // MQTT Flags
@@ -193,31 +194,31 @@ bool isRecordValid(const AccessRecord& record) {
     return calculateRecordCRC(record) == record.crc16;
 }
 
-void stringToBytes(const String& hexString, uint8_t* byteArray, uint8_t maxLen) {
+// Allocation-free hex helpers: bytes <-> hex text, no String involved anywhere.
+uint8_t hexNibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return 0;
+}
+
+// Parses up to maxLen bytes of hex text (e.g. "04A2B3C1") into byteArray.
+void hexToBytes(const char* hex, size_t hexLen, uint8_t* byteArray, uint8_t maxLen) {
     memset(byteArray, 0, maxLen);
-    for (uint16_t i = 0; i + 1 < hexString.length() && (i / 2) < maxLen; i += 2) {
-        byteArray[i / 2] = static_cast<uint8_t>(strtol(hexString.substring(i, i + 2).c_str(), nullptr, 16));
+    for (size_t i = 0; i + 1 < hexLen && (i / 2) < maxLen; i += 2) {
+        byteArray[i / 2] = (hexNibble(hex[i]) << 4) | hexNibble(hex[i + 1]);
     }
 }
 
-String uidToString() {
-    String uid;
-    for (byte i = 0; i < rfid.uid.size; i++) {
-        if (rfid.uid.uidByte[i] < 0x10) uid += "0";
-        uid += String(rfid.uid.uidByte[i], HEX);
+// Writes uppercase hex text for `len` bytes into out (out must be at least 2*len+1 bytes).
+void bytesToHex(const uint8_t* bytes, uint8_t len, char* out, size_t outSize) {
+    static const char hexChars[] = "0123456789ABCDEF";
+    size_t pos = 0;
+    for (uint8_t i = 0; i < len && pos + 2 < outSize; i++) {
+        out[pos++] = hexChars[bytes[i] >> 4];
+        out[pos++] = hexChars[bytes[i] & 0x0F];
     }
-    uid.toUpperCase();
-    return uid;
-}
-
-String recordUIDToString(const AccessRecord& record) {
-    String uid;
-    for (uint8_t i = 0; i < record.uidLen && i < 7; i++) {
-        if (record.uid[i] < 0x10) uid += "0";
-        uid += String(record.uid[i], HEX);
-    }
-    uid.toUpperCase();
-    return uid;
+    out[pos] = '\0';
 }
 
 const char* resultToText(uint8_t result) {
@@ -454,14 +455,14 @@ void saveCheckpoint(bool force = false) {
     eventsSinceCheckpoint = 0; acksSinceCheckpoint = 0;
 }
 
-bool logAccess(const DateTime& now, const String& scannedUID, uint8_t direction, uint8_t resultCode) {
+bool logAccess(const DateTime& now, const uint8_t* uidBytes, uint8_t uidLen, uint8_t direction, uint8_t resultCode) {
     if (queueIsFull()) { Serial.println("QUEUE FULL - EVENT DROPPED"); return false; }
 
     AccessRecord record = {};
     record.seq = ++globalSequence;
     record.ts = now.unixtime();
-    record.uidLen = min(static_cast<int>(scannedUID.length() / 2), 7);
-    stringToBytes(scannedUID, record.uid, 7);
+    record.uidLen = min(uidLen, (uint8_t)7);
+    memcpy(record.uid, uidBytes, record.uidLen);
     record.dir = direction;
     record.result = resultCode;
     record.mode = mqtt.connected() ? 0 : 1;
@@ -523,10 +524,13 @@ bool processPendingAck(bool currentlyWaiting) {
 }
 
 bool buildEventPayload(const AccessRecord& record, char* buffer, size_t bufferSize) {
+    char uidHex[15];
+    bytesToHex(record.uid, record.uidLen, uidHex, sizeof(uidHex));
+
     JsonDocument doc;
     doc["seq"] = record.seq;
     doc["dev"] = DEVICE_ID;
-    doc["uid"] = recordUIDToString(record);
+    doc["uid"] = uidHex; // ArduinoJson copies this into its own pool immediately
     doc["ts"] = record.ts;
     doc["tsrc"] = timeSourceToText(record.tsrc);
     doc["floor"] = record.floor;
@@ -567,12 +571,10 @@ void processACLUpdate() {
     for (JsonVariant card : cards) {
         AclRecord record = {};
         
-        String uidStr = card["uid"].as<String>();
-        uidStr.trim(); 
-        uidStr.toUpperCase();
-        
-        record.uidLen = min(static_cast<int>(uidStr.length() / 2), 7);
-        stringToBytes(uidStr, record.uid, 7);
+        const char* uidCstr = card["uid"] | "";
+        size_t uidCstrLen = strlen(uidCstr);
+        record.uidLen = min(uidCstrLen / 2, (size_t)7);
+        hexToBytes(uidCstr, uidCstrLen, record.uid, 7);
         
         // Parse floors into a bitmask (e.g., [1, 3] sets bits 1 and 3)
         JsonArray floors = card["floors"].as<JsonArray>();
@@ -585,13 +587,9 @@ void processACLUpdate() {
         record.valid_to = card["valid_to"] | 0xFFFFFFFF; 
         
         // Parse time window "07:00-19:00" into minutes from midnight
-        String win = card["win"].as<String>();
-        if (win.length() == 11) { 
-            uint16_t startH = win.substring(0, 2).toInt();
-            uint16_t startM = win.substring(3, 5).toInt();
-            uint16_t endH = win.substring(6, 8).toInt();
-            uint16_t endM = win.substring(9, 11).toInt();
-            
+        const char* win = card["win"] | "";
+        int startH, startM, endH, endM;
+        if (strlen(win) == 11 && sscanf(win, "%d:%d-%d:%d", &startH, &startM, &endH, &endM) == 4) {
             record.win_start_m = (startH * 60) + startM;
             record.win_end_m = (endH * 60) + endM;
         } else {
@@ -636,7 +634,8 @@ void handleExitButton() {
         if (reading != stableExitButtonState) {
             stableExitButtonState = reading;
             if (stableExitButtonState == LOW && !isRelayActive) {
-                if (logAccess(rtc.now(), "00000000000000", DIR_OUT, RESULT_MANUAL)) {
+                static const uint8_t zeroUid[7] = {0};
+                if (logAccess(rtc.now(), zeroUid, 7, DIR_OUT, RESULT_MANUAL)) {
                     grantAccess();
                     Serial.println("EXIT BUTTON -> GRANTED");
                 } else {
@@ -652,9 +651,7 @@ void handleExitButton() {
 
 void handleRFID() {
     if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return;
-    
-    String scannedUID = uidToString();
-    
+
     uint8_t uidLen = rfid.uid.size;
     uint8_t uidBytes[7];
     memset(uidBytes, 0, sizeof(uidBytes));
@@ -664,15 +661,21 @@ void handleRFID() {
     rfid.PCD_StopCrypto1();
 
     unsigned long nowMillis = millis();
-    if (scannedUID == lastScannedUID && nowMillis - lastScanTime < RFID_DEBOUNCE_MS) return;
+    bool sameCard = (uidLen == lastUidLen) && (memcmp(uidBytes, lastUid, uidLen) == 0);
+    if (sameCard && nowMillis - lastScanTime < RFID_DEBOUNCE_MS) return;
 
-    lastScannedUID = scannedUID;
+    memcpy(lastUid, uidBytes, uidLen);
+    lastUidLen = uidLen;
     lastScanTime = nowMillis;
-    Serial.println("RFID UID: " + scannedUID);
+
+    char uidHex[15];
+    bytesToHex(uidBytes, uidLen, uidHex, sizeof(uidHex));
+    Serial.print("RFID UID: ");
+    Serial.println(uidHex);
 
     uint8_t resultCode = evaluateAccess(uidBytes, uidLen, rtc.now());
-    
-    if (logAccess(rtc.now(), scannedUID, DIR_IN, resultCode)) {
+
+    if (logAccess(rtc.now(), uidBytes, uidLen, DIR_IN, resultCode)) {
         if (resultCode == RESULT_GRANTED) {
             grantAccess();
         } else {
@@ -886,9 +889,9 @@ void networkTaskCode(void* parameter) {
                     hb["heap"] = ESP.getFreeHeap(); 
                     hb["rssi"] = 0;
 
-                    String payload; 
-                    serializeJson(hb, payload);
-                    mqtt.publish(TOPIC_HEARTBEAT, payload, false, 0); // QoS 0 as required
+                    char hbPayload[128];
+                    serializeJson(hb, hbPayload, sizeof(hbPayload));
+                    mqtt.publish(TOPIC_HEARTBEAT, hbPayload, false, 0); // QoS 0 as required
                     lastHeartbeat = now;
                 }
 
@@ -970,4 +973,4 @@ void loop() {
     handleExitButton();
     handleRFID();
     vTaskDelay(1 / portTICK_PERIOD_MS);
-} 
+}
