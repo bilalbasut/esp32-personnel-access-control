@@ -939,6 +939,7 @@ void setup() {
     pinMode(GREEN_LED_PIN, OUTPUT);
     pinMode(BUZZER_PIN, OUTPUT);
     pinMode(RED_LED_PIN, OUTPUT);
+    pinMode(EXIT_BUTTON_PIN, INPUT);
 
     initFileSystem();
 
