@@ -48,6 +48,16 @@ function formatWindow(startM, endM) {
 // --- HELPER FUNCTION: AUTOMATED ACL PUBLISHER ---
 // Builds the JSON payload the ESP32 firmware actually needs and pushes it
 // to the broker as a retained message.
+
+// Seeded from wall-clock time so a restarted server still issues a version
+// higher than whatever the device last saved (its "ver" persists in NVS
+// across firmware reboots too). Bumped explicitly on every publish so two
+// calls in the same second/millisecond (e.g. add then revoke back-to-back)
+// can never produce an equal version - the firmware ignores non-increasing
+// versions (`if (newVersion <= currentAclVersion) return;`), so a collision
+// here means a real ACL change silently never reaches the device.
+let lastPublishedAclVersion = Math.floor(Date.now() / 1000);
+
 const publishAclUpdate = async () => {
     try {
         // Pull everything the firmware needs to make a decision, not just uid.
@@ -55,16 +65,34 @@ const publishAclUpdate = async () => {
             'SELECT uid, floors, valid_to, win_start_m, win_end_m FROM cards WHERE aktif = 1'
         );
 
-        const activeCards = result.rows.map((row) => ({
-            uid: row.uid,
-            floors: parseFloors(row.floors),
-            // Firmware falls back to "no expiry" if this is missing; sending
-            // it explicitly avoids relying on that fallback.
-            valid_to: row.valid_to !== null ? Number(row.valid_to) : 4294967295,
-            win: formatWindow(row.win_start_m, row.win_end_m),
-        }));
+        const activeCards = result.rows.map((row) => {
+            const card = {
+                uid: row.uid,
+                floors: parseFloors(row.floors),
+                // Firmware falls back to "no expiry" if this is missing; sending
+                // it explicitly avoids relying on that fallback.
+                valid_to: row.valid_to !== null ? Number(row.valid_to) : 4294967295,
+            };
 
-        const newVersion = Math.floor(Date.now() / 1000);
+            const startM = Number.isFinite(row.win_start_m) ? row.win_start_m : 0;
+            const endM = Number.isFinite(row.win_end_m) ? row.win_end_m : 1440;
+            const isFullDay = startM === 0 && endM === 1440;
+
+            // "HH:MM" can only represent up to 23:59 (minute 1439), so a full-day
+            // window can never round-trip through formatWindow() without loss -
+            // 1440 gets forced to 1439, and the firmware then denies access during
+            // the last minute of every day (its check is `>= win_end_m`). Omitting
+            // "win" entirely lets the firmware's own missing-field fallback
+            // (0-1440, genuinely unrestricted) handle it correctly instead.
+            if (!isFullDay) {
+                card.win = formatWindow(startM, endM);
+            }
+
+            return card;
+        });
+
+        const newVersion = Math.max(Math.floor(Date.now() / 1000), lastPublishedAclVersion + 1);
+        lastPublishedAclVersion = newVersion;
 
         const aclPayload = JSON.stringify({
             ver: newVersion,
@@ -130,6 +158,17 @@ app.post('/api/cards/add', async (req, res) => {
     const windowStart = Number.isFinite(win_start_m) ? win_start_m : 0;
     const windowEnd = Number.isFinite(win_end_m) ? win_end_m : 1440;
 
+    // Firmware stores floor numbers in a 32-bit bitmask and silently drops any
+    // floor >= 32 (`if (floorNum < 32) ...`) - reject bad input here instead of
+    // letting it fail invisibly on-device.
+    const floorList = parseFloors(floors);
+    if (floorList.some((f) => f < 0 || f > 31)) {
+        return res.status(400).json({ error: 'floors must be between 0 and 31.' });
+    }
+    if (windowStart < 0 || windowStart > 1440 || windowEnd < 0 || windowEnd > 1440 || windowStart >= windowEnd) {
+        return res.status(400).json({ error: 'win_start_m must be less than win_end_m, both within 0-1440.' });
+    }
+
     // A single dedicated client is required for a real transaction - pool.query()
     // may hand BEGIN/INSERT/COMMIT to three different pooled connections,
     // making the "transaction" a no-op in practice.
@@ -166,7 +205,16 @@ app.post('/api/cards/add', async (req, res) => {
         res.json({ message: 'Employee added and hardware updated successfully.' });
     } catch (err) {
         await dbClient.query('ROLLBACK');
-        res.status(500).json({ error: 'Database transaction failed: ' + err.message });
+        if (err.code === '23505') {
+            // uid is the PRIMARY KEY on cards - this is a duplicate card, not a
+            // server fault. A previously revoked card can't be re-added through
+            // this endpoint yet (that's an upsert/reactivation decision - flagging
+            // rather than guessing at the policy), so surface that clearly instead
+            // of a generic 500.
+            res.status(409).json({ error: `Card UID ${normalizedUid} is already registered.` });
+        } else {
+            res.status(500).json({ error: 'Database transaction failed: ' + err.message });
+        }
     } finally {
         dbClient.release();
     }
