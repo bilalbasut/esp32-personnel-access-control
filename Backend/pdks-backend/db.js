@@ -66,6 +66,15 @@ const initDB = async () => {
         -- never appear and server.js's ACL query will fail.
         ALTER TABLE cards ADD COLUMN IF NOT EXISTS win_start_m SMALLINT DEFAULT 0;
         ALTER TABLE cards ADD COLUMN IF NOT EXISTS win_end_m SMALLINT DEFAULT 1440;
+
+        -- devices.fw already existed but nothing wrote to it; these are new.
+        -- Spec 7.3 requires the device status screen to show queue depth and
+        -- firmware version, but the heartbeat payload's fields were being
+        -- received and discarded entirely.
+        ALTER TABLE devices ADD COLUMN IF NOT EXISTS queue_depth INTEGER;
+        ALTER TABLE devices ADD COLUMN IF NOT EXISTS heap_free INTEGER;
+        ALTER TABLE devices ADD COLUMN IF NOT EXISTS queue_overflow INTEGER;
+        ALTER TABLE devices ADD COLUMN IF NOT EXISTS uptime_s BIGINT;
     `;
 
     try {
