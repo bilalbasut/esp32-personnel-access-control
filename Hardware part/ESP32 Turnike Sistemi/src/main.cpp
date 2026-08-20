@@ -141,6 +141,7 @@ const char* TOPIC_ACL       = "pdks/merkez/cfg/acl";
 // RAM State
 uint32_t readPointer = 0, writePointer = 0, globalSequence = 0;
 uint32_t currentAclVersion = 0, queueCount = 0;
+uint32_t queueOverflowCount = 0; // number of unacked records evicted to make room
 uint32_t eventsSinceCheckpoint = 0, acksSinceCheckpoint = 0;
 std::vector<AclRecord> aclList;
 
@@ -383,6 +384,23 @@ bool queueIsEmpty() {
     return empty;
 }
 
+// When the queue is full, drop the single oldest unacknowledged record to make room
+// for the new one, instead of refusing the write. Doors must keep working even during
+// an extended outage; sacrificing the oldest unsent record is the documented trade-off
+// readPointer is normally only mutated by the network task
+// (on ACK) - this is the one place it's also mutated from the RFID/exit-button
+// path, so it must go through queueMux like every other cross-core queue update.
+bool evictOldestIfFull() {
+    bool wasFull = false;
+    portENTER_CRITICAL(&queueMux);
+    if (queueCount >= MAX_EVENTS) {
+        readPointer = (readPointer + 1) % MAX_EVENTS;
+        wasFull = true;
+    }
+    portEXIT_CRITICAL(&queueMux);
+    return wasFull;
+}
+
 File openEventFile(const char* mode) { return LittleFS.open(EVENT_FILE, mode); }
 
 bool writeEventRecord(const AccessRecord& record, uint32_t index) {
@@ -456,7 +474,11 @@ void saveCheckpoint(bool force = false) {
 }
 
 bool logAccess(const DateTime& now, const uint8_t* uidBytes, uint8_t uidLen, uint8_t direction, uint8_t resultCode) {
-    if (queueIsFull()) { Serial.println("QUEUE FULL - EVENT DROPPED"); return false; }
+    bool overwroteOldest = evictOldestIfFull();
+    if (overwroteOldest) {
+        queueOverflowCount++;
+        Serial.printf("WARNING: Queue full - oldest unacknowledged event overwritten (total overflow=%u)\n", queueOverflowCount);
+    }
 
     AccessRecord record = {};
     record.seq = ++globalSequence;
@@ -473,12 +495,16 @@ bool logAccess(const DateTime& now, const uint8_t* uidBytes, uint8_t uidLen, uin
     if (!writeEventRecord(record, writePointer)) {
         globalSequence--;
         Serial.println("ERROR: Event write failed.");
+        // Note: if overwroteOldest is true here, readPointer has already advanced past
+        // the evicted slot even though the replacement write failed - a rare double-
+        // fault (queue full + flash I/O error at the same time) that trades a single
+        // stale record for keeping the door responsive. Documented, not auto-recovered.
         return false;
     }
 
     writePointer = (writePointer + 1) % MAX_EVENTS;
     portENTER_CRITICAL(&queueMux);
-    queueCount++;
+    if (!overwroteOldest) queueCount++;
     portEXIT_CRITICAL(&queueMux);
     eventsSinceCheckpoint++;
     Serial.printf("EVENT STORED seq=%d\n", record.seq);
@@ -888,6 +914,7 @@ void networkTaskCode(void* parameter) {
                     
                     hb["heap"] = ESP.getFreeHeap(); 
                     hb["rssi"] = 0;
+                    hb["qOverflow"] = queueOverflowCount;
 
                     char hbPayload[128];
                     serializeJson(hb, hbPayload, sizeof(hbPayload));
