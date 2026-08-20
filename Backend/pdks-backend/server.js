@@ -115,7 +115,7 @@ const publishAclUpdate = async () => {
 
 // --- API ENDPOINTS FOR THE WEB PANEL ---
 
-// 1. GET: Live Feed of Door Scans
+// GET: Live Feed of Door Scans
 app.get('/api/events', async (req, res) => {
     try {
         const query = `
@@ -132,7 +132,7 @@ app.get('/api/events', async (req, res) => {
     }
 });
 
-// 2. GET: Device Fleet Status
+// GET: Device Fleet Status
 app.get('/api/devices', async (req, res) => {
     try {
         const result = await pool.query('SELECT * FROM devices ORDER BY id ASC');
@@ -142,7 +142,68 @@ app.get('/api/devices', async (req, res) => {
     }
 });
 
-// 3. POST: Onboard a New Employee & Card
+// GET: Employee and Card List
+app.get('/api/cards', async (req, res) => {
+    try {
+        const query = `
+            SELECT c.uid, c.floors, c.valid_from, c.valid_to, c.win_start_m, c.win_end_m, c.aktif,
+                   e.id AS employee_id, e.ad_soyad, e.departman
+            FROM cards c
+            LEFT JOIN employees e ON c.employee_id = e.id
+            ORDER BY e.ad_soyad ASC
+        `;
+        const result = await pool.query(query);
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// GET: Date-range PDKS Report with optional CSV export
+app.get('/api/reports/pdks', async (req, res) => {
+    const { start_ts, end_ts, format } = req.query;
+    
+    if (!start_ts || !end_ts) {
+        return res.status(400).json({ error: 'start_ts and end_ts (Unix timestamps) are required.' });
+    }
+
+    try {
+        const query = `
+            SELECT 
+                e.ad_soyad, 
+                e.departman,
+                TO_CHAR(TO_TIMESTAMP(a.ts_utc), 'YYYY-MM-DD') as working_date,
+                MIN(a.ts_utc) as first_in,
+                MAX(a.ts_utc) as last_out,
+                (MAX(a.ts_utc) - MIN(a.ts_utc)) as duration_seconds
+            FROM access_events a
+            JOIN employees e ON a.employee_id = e.id
+            WHERE a.ts_utc >= $1 AND a.ts_utc <= $2 AND a.result = 0
+            GROUP BY e.ad_soyad, e.departman, working_date
+            ORDER BY working_date DESC, e.ad_soyad ASC
+        `;
+        const result = await pool.query(query, [start_ts, end_ts]);
+
+        // Handle CSV Export
+        if (format === 'csv') {
+            const header = 'Name,Department,Date,First In,Last Out,Duration (Seconds)\n';
+            const rows = result.rows.map(r => 
+                `"${r.ad_soyad}","${r.departman}","${r.working_date}",${r.first_in},${r.last_out},${r.duration_seconds}`
+            ).join('\n');
+            
+            res.header('Content-Type', 'text/csv');
+            res.attachment('pdks_report.csv');
+            return res.send(header + rows);
+        }
+
+        // Default to JSON for web panel display
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// POST: Onboard a New Employee & Card
 app.post('/api/cards/add', async (req, res) => {
     const { ad_soyad, departman, uid, floors, valid_from, valid_to, win_start_m, win_end_m } = req.body;
 
@@ -220,7 +281,7 @@ app.post('/api/cards/add', async (req, res) => {
     }
 });
 
-// 4. POST: Revoke a Card (Instantly blocks access)
+// POST: Revoke a Card (Instantly blocks access)
 app.post('/api/cards/revoke', async (req, res) => {
     const { uid } = req.body;
     if (!uid) {
@@ -239,6 +300,27 @@ app.post('/api/cards/revoke', async (req, res) => {
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
+});
+
+// POST: Send remote command to ESP32
+app.post('/api/devices/:id/command', (req, res) => {
+    const { id } = req.params;
+    const { cmd } = req.body; 
+
+    const validCommands = ['open', 'sync', 'reboot', 'settime', 'ota'];
+    if (!validCommands.includes(cmd)) {
+        return res.status(400).json({ error: 'Invalid command.' });
+    }
+
+    const cmdTopic = `pdks/merkez/dev/${id}/cmd`;
+    
+    client.publish(cmdTopic, cmd, { qos: 1 }, (err) => {
+        if (err) {
+            console.error(`Failed to send ${cmd} to ${id}:`, err);
+            return res.status(500).json({ error: 'Failed to send command.' });
+        }
+        res.json({ message: `Command '${cmd}' queued for device ${id}.` });
+    });
 });
 
 const PORT = process.env.PORT || 3000;
