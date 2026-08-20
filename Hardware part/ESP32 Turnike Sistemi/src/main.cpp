@@ -124,11 +124,11 @@ TaskHandle_t NetworkTask = nullptr;
 
 // Network Config
 byte mac[] = { 0x00, 0x1A, 0x2B, 0x3C, 0x4D, 0x5E };
-IPAddress deviceIP(192, 168, 10, 50);
+IPAddress deviceIP(192, 168, 11, 155);
 IPAddress dnsIP(192, 168, 10, 1);
 IPAddress gatewayIP(192, 168, 10, 1);
-IPAddress subnetMask(255, 255, 255, 0);
-IPAddress mqttServer(192, 168, 10, 164);
+IPAddress subnetMask(255, 255, 254, 0);
+IPAddress mqttServer(192, 168, 11, 66);
 const uint16_t MQTT_PORT = 1883;
 
 // Topics
@@ -928,16 +928,17 @@ void setup() {
     esp_task_wdt_init(10, true);
     esp_task_wdt_add(NULL);
 
-    pinMode(RELAY_PIN, OUTPUT);
-    pinMode(BUZZER_PIN, OUTPUT);
-    pinMode(GREEN_LED_PIN, OUTPUT);
-    pinMode(RED_LED_PIN, OUTPUT);
-    pinMode(EXIT_BUTTON_PIN, INPUT); // Requires external 10k pull-up
-
+    // 1. Pre-load the safe LOW state into the register
     digitalWrite(RELAY_PIN, LOW);
-    digitalWrite(BUZZER_PIN, LOW);
     digitalWrite(GREEN_LED_PIN, LOW);
+    digitalWrite(BUZZER_PIN, LOW);
     digitalWrite(RED_LED_PIN, LOW);
+
+    // 2. NOW activate the output drivers
+    pinMode(RELAY_PIN, OUTPUT);
+    pinMode(GREEN_LED_PIN, OUTPUT);
+    pinMode(BUZZER_PIN, OUTPUT);
+    pinMode(RED_LED_PIN, OUTPUT);
 
     initFileSystem();
 
