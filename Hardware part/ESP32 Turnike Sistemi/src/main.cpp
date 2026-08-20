@@ -137,6 +137,8 @@ const char* TOPIC_EVENT_ACK = "pdks/merkez/dev/GATE-K3-01/event/ack";
 const char* TOPIC_STATUS    = "pdks/merkez/dev/GATE-K3-01/status";
 const char* TOPIC_HEARTBEAT = "pdks/merkez/dev/GATE-K3-01/hb";
 const char* TOPIC_ACL       = "pdks/merkez/cfg/acl";
+const char* TOPIC_CMD     = "pdks/merkez/dev/GATE-K3-01/cmd";
+const char* TOPIC_CMD_RES = "pdks/merkez/dev/GATE-K3-01/cmd/res";
 
 // RAM State
 uint32_t readPointer = 0, writePointer = 0, globalSequence = 0;
@@ -533,6 +535,28 @@ void mqttCallback(String& topic, String& payload) {
     } else if (topic == TOPIC_ACL) {
         pendingAclPayload = payload;
         aclMessageReceived = true;
+    } else if (topic == TOPIC_CMD) {
+        Serial.println("Remote command received: " + payload);
+        
+        if (payload == "open") {
+            grantAccess();
+            // Log this as a manual entry in the database just like the exit button
+            static const uint8_t remoteUid[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}; 
+            logAccess(rtc.now(), remoteUid, 7, DIR_IN, RESULT_MANUAL);
+            mqtt.publish(TOPIC_CMD_RES, "open_ok", false, 1);
+            
+        } else if (payload == "reboot") {
+            mqtt.publish(TOPIC_CMD_RES, "rebooting", false, 1);
+            delay(500); // Give MQTT time to push the message out
+            ESP.restart(); // Hardware reboot
+            
+        } else if (payload == "sync") {
+            // Force a re-download of the ACL by tricking the device into thinking it has version 0
+            currentAclVersion = 0;
+            preferences.putUInt("aclVer", 0);
+            mqtt.publish(TOPIC_CMD_RES, "sync_triggered", false, 1);
+            // The broker will automatically push the retained ACL message again shortly
+        }
     }
 }
 
@@ -899,6 +923,7 @@ void networkTaskCode(void* parameter) {
                         mqtt.publish(TOPIC_STATUS, "online", true, 1);
                         mqtt.subscribe(TOPIC_EVENT_ACK, 1);
                         mqtt.subscribe(TOPIC_ACL, 1);
+                        mqtt.subscribe(TOPIC_CMD, 1);
                     } else {
                         backoff = min(backoff * 2, 60000UL);
                         backoff += random(0, 1000); // jitter, avoids synchronized reconnect storms across gate units
