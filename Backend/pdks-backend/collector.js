@@ -16,6 +16,7 @@ client.on('connect', () => {
     client.subscribe('pdks/merkez/dev/+/event', { qos: 1 });
     client.subscribe('pdks/merkez/dev/+/status', { qos: 1 });
     client.subscribe('pdks/merkez/dev/+/hb', { qos: 0 }); 
+    client.subscribe('pdks/merkez/dev/+/cmd/res', { qos: 1 });
 });
 
 client.on('error', (err) => {
@@ -147,6 +148,11 @@ client.on('message', async (topic, message) => {
         } catch (err) {
             console.error('Heartbeat update error:', err);
         }
+    }
+
+    // --- Process Command Responses ---
+    else if (topic.endsWith('/cmd/res')) {
+        console.log(`[CMD RESULT] Device ${deviceId} responded: ${payload}`);
     }
 });
 
