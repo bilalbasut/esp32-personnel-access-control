@@ -140,7 +140,7 @@ IPAddress deviceIP(192, 168, 11, 155);
 IPAddress dnsIP(192, 168, 10, 1);
 IPAddress gatewayIP(192, 168, 10, 1);
 IPAddress subnetMask(255, 255, 254, 0);
-IPAddress mqttServer(192, 168, 11, 66);
+IPAddress mqttServer(192, 168, 10, 250);
 const uint16_t MQTT_PORT = 1883;
 
 // Topics
