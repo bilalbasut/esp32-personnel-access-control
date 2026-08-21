@@ -159,6 +159,23 @@ app.get('/api/cards', async (req, res) => {
     }
 });
 
+// Timezone used to bucket events into calendar days for the PDKS report.
+// Records are stored in UTC (per spec 5.3); grouping by raw UTC day would
+// misfile a shift that starts just after local midnight into the wrong day,
+// so this must be converted explicitly rather than left to whatever
+// timezone the Postgres container happens to default to (usually UTC).
+const REPORT_TZ = process.env.REPORT_TZ || 'Europe/Istanbul';
+
+// CSV field escaping: quotes the value and doubles up any embedded quotes so
+// a name/department containing a comma or quote can't corrupt the row
+// structure, and renders null/undefined as an empty cell instead of the
+// literal string "null" (which shows up for anyone who entered but hasn't
+// exited yet within the report window).
+function csvField(value) {
+    if (value === null || value === undefined) return '';
+    return `"${String(value).replace(/"/g, '""')}"`;
+}
+
 // GET: Date-range PDKS Report with optional CSV export
 app.get('/api/reports/pdks', async (req, res) => {
     const { start_ts, end_ts, format } = req.query;
@@ -172,26 +189,42 @@ app.get('/api/reports/pdks', async (req, res) => {
             SELECT 
                 e.ad_soyad, 
                 e.departman,
-                TO_CHAR(TO_TIMESTAMP(a.ts_utc), 'YYYY-MM-DD') as working_date,
-                MIN(a.ts_utc) as first_in,
-                MAX(a.ts_utc) as last_out,
-                (MAX(a.ts_utc) - MIN(a.ts_utc)) as duration_seconds
+                TO_CHAR(TO_TIMESTAMP(a.ts_utc) AT TIME ZONE $3, 'YYYY-MM-DD') as working_date,
+                MIN(a.ts_utc) FILTER (WHERE a.dir = 0 AND a.result = 0) as first_in,
+                MAX(a.ts_utc) FILTER (WHERE a.dir = 1) as last_out,
+                CASE
+                    WHEN MIN(a.ts_utc) FILTER (WHERE a.dir = 0 AND a.result = 0) IS NOT NULL
+                     AND MAX(a.ts_utc) FILTER (WHERE a.dir = 1) IS NOT NULL
+                     AND MAX(a.ts_utc) FILTER (WHERE a.dir = 1) > MIN(a.ts_utc) FILTER (WHERE a.dir = 0 AND a.result = 0)
+                    THEN MAX(a.ts_utc) FILTER (WHERE a.dir = 1) - MIN(a.ts_utc) FILTER (WHERE a.dir = 0 AND a.result = 0)
+                    ELSE NULL
+                END as duration_seconds
             FROM access_events a
             JOIN employees e ON a.employee_id = e.id
-            WHERE a.ts_utc >= $1 AND a.ts_utc <= $2 AND a.result = 0
+            WHERE a.ts_utc >= $1 AND a.ts_utc <= $2
             GROUP BY e.ad_soyad, e.departman, working_date
             ORDER BY working_date DESC, e.ad_soyad ASC
         `;
-        const result = await pool.query(query, [start_ts, end_ts]);
+        // Entries are still restricted to result=0 (granted) inside the FILTER
+        // clauses above - a denied scan shouldn't count as clocking in - but
+        // exits are no longer filtered by result at all, since the exit button
+        // never checks the ACL and always logs result=manual, never granted.
+        // The old blanket "AND a.result = 0" in the WHERE clause excluded every
+        // exit row before aggregation even ran, so MAX(ts_utc) was silently
+        // computed over entries only - "last exit" was really "latest entry",
+        // collapsing duration to 0 whenever there was only one entry that day.
+        const result = await pool.query(query, [start_ts, end_ts, REPORT_TZ]);
 
         // Handle CSV Export
         if (format === 'csv') {
             const header = 'Name,Department,Date,First In,Last Out,Duration (Seconds)\n';
             const rows = result.rows.map(r => 
-                `"${r.ad_soyad}","${r.departman}","${r.working_date}",${r.first_in},${r.last_out},${r.duration_seconds}`
+                [r.ad_soyad, r.departman, r.working_date, r.first_in, r.last_out, r.duration_seconds]
+                    .map(csvField)
+                    .join(',')
             ).join('\n');
             
-            res.header('Content-Type', 'text/csv');
+            res.header('Content-Type', 'text/csv; charset=utf-8');
             res.attachment('pdks_report.csv');
             return res.send(header + rows);
         }
@@ -297,6 +330,35 @@ app.post('/api/cards/revoke', async (req, res) => {
         await publishAclUpdate();
 
         res.json({ message: 'Card revoked and hardware updated.' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// DELETE: Permanently remove a card record - this is the actual "silme"
+// (delete) FR-13 asks for, distinct from revoke's "aktif=0" (soft-block that
+// keeps the row and its history). Deleting frees the uid entirely, e.g. to
+// physically reissue the same card to a different employee - previously,
+// re-adding a uid that still existed as a revoked row would hit a 409 from
+// the PRIMARY KEY conflict in /api/cards/add.
+// Employees are left untouched (only the cards row is removed), and past
+// access_events rows aren't affected either, since they only store the raw
+// uid string rather than a foreign key into cards.
+app.delete('/api/cards/:uid', async (req, res) => {
+    const normalizedUid = String(req.params.uid).trim().toUpperCase();
+
+    try {
+        const result = await pool.query('DELETE FROM cards WHERE uid = $1 RETURNING uid', [normalizedUid]);
+        if (result.rowCount === 0) {
+            return res.status(404).json({ error: `Card UID ${normalizedUid} not found.` });
+        }
+
+        // The deleted card might still have been active (aktif=1) if someone
+        // deletes without revoking first - refresh the ACL so the device's
+        // retained list matches reality either way.
+        await publishAclUpdate();
+
+        res.json({ message: `Card UID ${normalizedUid} deleted.` });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

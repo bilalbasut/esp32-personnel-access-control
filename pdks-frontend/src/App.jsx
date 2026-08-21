@@ -132,17 +132,20 @@ function App() {
                 {devices.length === 0 ? <tr><td colSpan="3" className="text-center text-muted">No devices found</td></tr> : null}
                 {devices.map(dev => {
                   const isOnline = dev.durum === 'online';
-                  // 3. We now use the pure `currentTime` state instead of Date.now()
-                  const isDead = (currentTime - dev.son_gorulme) > 60; 
+                  // Explicitly cast the BIGINT string to a Number for safe subtraction
+                  const isDead = (currentTime - Number(dev.son_gorulme)) > 60; 
                   return (
                     <tr key={dev.id}>
                       <td><strong>{dev.id}</strong></td>
                       <td>
                         {isOnline && !isDead ? '🟢 Online' : '🔴 Offline'}
                       </td>
-                      <td className="text-muted">{new Date(dev.son_gorulme * 1000).toLocaleTimeString()}</td>
+                      <td className="text-muted">
+                        {/* Switched to toLocaleString() and cast to Number */}
+                        {new Date(Number(dev.son_gorulme) * 1000).toLocaleString()}
+                      </td>
                     </tr>
-                  )
+                  )  
                 })}
               </tbody>
             </table>
@@ -166,7 +169,8 @@ function App() {
                   {events.map((ev, idx) => (
                     <tr key={idx}>
                       <td>
-                        {new Date(ev.ts_utc * 1000).toLocaleTimeString()}
+                        {/* Switched to toLocaleString() and cast to Number */}
+                        {new Date(Number(ev.ts_utc) * 1000).toLocaleString()}
                         {ev.mode === 1 && <span title="Scanned while hardware was offline"> ⚡</span>}
                       </td>
                       <td>{ev.dir === 0 ? '⬇️ IN' : '⬆️ OUT'}</td>
