@@ -1,11 +1,23 @@
 require('dotenv').config();
 const express = require('express');
 const mqtt = require('mqtt');
+const crypto = require('crypto');
+const path = require('path');
+const fs = require('fs');
 const pool = require('./db');
 
 const app = express();
 app.use(express.json());
 app.use(express.static('public'));
+
+// FR-18 (OTA): where uploaded firmware binaries live on disk, and the base
+// URL the device itself can reach this server at. The device can't resolve
+// "localhost" - it needs the same kind of LAN-reachable address already used
+// for MQTT_HOST/DB_HOST, so this follows that same env-var convention rather
+// than guessing from whatever address the admin's browser happened to use.
+const FIRMWARE_DIR = path.join(__dirname, 'firmware_files');
+fs.mkdirSync(FIRMWARE_DIR, { recursive: true });
+app.use('/firmware', express.static(FIRMWARE_DIR));
 
 const mqttHost = process.env.MQTT_HOST || '127.0.0.1';
 const client = mqtt.connect(`mqtt://${mqttHost}:1883`);
@@ -533,7 +545,9 @@ app.post('/api/devices/:id/command', (req, res) => {
     const { id } = req.params;
     const { cmd } = req.body; 
 
-    const validCommands = ['open', 'sync', 'reboot', 'settime', 'ota'];
+    // "ota" is handled by POST /api/devices/:id/ota instead - it needs a
+    // version/url/md5 payload, not just a bare command word like these do.
+    const validCommands = ['open', 'sync', 'reboot', 'settime'];
     if (!validCommands.includes(cmd)) {
         return res.status(400).json({ error: 'Invalid command.' });
     }
@@ -547,6 +561,94 @@ app.post('/api/devices/:id/command', (req, res) => {
         }
         res.json({ message: `Command '${cmd}' queued for device ${id}.` });
     });
+});
+
+// POST: Upload a firmware binary. Body is the raw .bin, version in the query
+// string (e.g. POST /api/firmware/upload?version=1.3.0). Computes and stores
+// the MD5 the firmware itself will verify against before it ever marks the
+// new partition bootable - see performOTA()'s safety notes in main.cpp.
+app.post(
+    '/api/firmware/upload',
+    express.raw({ type: 'application/octet-stream', limit: '4mb' }),
+    async (req, res) => {
+        const { version } = req.query;
+        // The version becomes part of a filename written to disk - restrict
+        // it to a safe charset so it can't be used for path traversal
+        // (e.g. "../../etc/passwd").
+        if (!version || !/^[a-zA-Z0-9._-]{1,50}$/.test(version)) {
+            return res.status(400).json({ error: 'version query param is required (alphanumeric, dot, dash, underscore only).' });
+        }
+        if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+            return res.status(400).json({ error: 'Request body must be the raw firmware binary (application/octet-stream).' });
+        }
+
+        const filename = `${version}.bin`;
+        const md5 = crypto.createHash('md5').update(req.body).digest('hex');
+        const size = req.body.length;
+        const now = Math.floor(Date.now() / 1000);
+
+        try {
+            fs.writeFileSync(path.join(FIRMWARE_DIR, filename), req.body);
+            await pool.query(
+                `INSERT INTO firmware (version, filename, md5, size, uploaded_at)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (version) DO UPDATE SET filename = EXCLUDED.filename, md5 = EXCLUDED.md5, size = EXCLUDED.size, uploaded_at = EXCLUDED.uploaded_at`,
+                [version, filename, md5, size, now]
+            );
+            res.json({ message: `Firmware ${version} uploaded.`, version, md5, size });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    }
+);
+
+// GET: List uploaded firmware versions
+app.get('/api/firmware', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT version, filename, md5, size, uploaded_at FROM firmware ORDER BY uploaded_at DESC');
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// POST: Trigger an OTA update on a specific device for a specific,
+// already-uploaded firmware version. Deliberately requires an explicit
+// version rather than assuming "latest" - an OTA push to a physical door
+// controller shouldn't depend on an implicit ordering the caller can't see.
+app.post('/api/devices/:id/ota', async (req, res) => {
+    const { id } = req.params;
+    const { version } = req.body;
+
+    if (!version) {
+        return res.status(400).json({ error: 'version is required.' });
+    }
+    const panelBaseUrl = process.env.PANEL_BASE_URL;
+    if (!panelBaseUrl) {
+        return res.status(500).json({ error: 'PANEL_BASE_URL is not configured - set it in .env to this server\'s LAN-reachable address (e.g. http://192.168.11.66:3000), since the device cannot resolve "localhost".' });
+    }
+
+    try {
+        const result = await pool.query('SELECT filename, md5, size FROM firmware WHERE version = $1', [version]);
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: `Firmware version ${version} has not been uploaded.` });
+        }
+        const { filename, md5, size } = result.rows[0];
+        const url = `${panelBaseUrl.replace(/\/$/, '')}/firmware/${filename}`;
+
+        const cmdTopic = `pdks/merkez/dev/${id}/cmd`;
+        const cmdPayload = JSON.stringify({ cmd: 'ota', url, md5, size });
+
+        client.publish(cmdTopic, cmdPayload, { qos: 1 }, (err) => {
+            if (err) {
+                console.error(`Failed to send OTA command to ${id}:`, err);
+                return res.status(500).json({ error: 'Failed to send OTA command.' });
+            }
+            res.json({ message: `OTA to version ${version} queued for device ${id}.`, url });
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 const PORT = process.env.PORT || 3000;

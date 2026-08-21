@@ -75,6 +75,23 @@ const initDB = async () => {
         ALTER TABLE devices ADD COLUMN IF NOT EXISTS heap_free INTEGER;
         ALTER TABLE devices ADD COLUMN IF NOT EXISTS queue_overflow INTEGER;
         ALTER TABLE devices ADD COLUMN IF NOT EXISTS uptime_s BIGINT;
+
+        -- FR-18 (OTA). One row per uploaded firmware build; the firmware's
+        -- own uid-less, device-agnostic binary lives on disk under
+        -- firmware_files/, this table is just the md5/size metadata needed
+        -- to build the OTA command payload and verify the download.
+        CREATE TABLE IF NOT EXISTS firmware (
+            version VARCHAR(50) PRIMARY KEY,
+            filename VARCHAR(255) NOT NULL,
+            md5 VARCHAR(32) NOT NULL,
+            size INTEGER NOT NULL,
+            uploaded_at BIGINT
+        );
+
+        -- Populated from cmd/res messages (ota_downloading / ota_ok_rebooting
+        -- / ota_failed) so the panel can show update progress per device.
+        ALTER TABLE devices ADD COLUMN IF NOT EXISTS ota_status VARCHAR(50);
+        ALTER TABLE devices ADD COLUMN IF NOT EXISTS ota_updated_at BIGINT;
     `;
 
     try {

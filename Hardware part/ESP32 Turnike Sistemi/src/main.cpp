@@ -14,6 +14,7 @@
 #include <MQTT.h>
 #include <esp_task_wdt.h>
 #include <esp_system.h>
+#include <Update.h>
 
 #include <MFRC522v2.h>
 #include <MFRC522DriverSPI.h>
@@ -60,6 +61,17 @@
 #define NTP_SYNC_INTERVAL_MS 3600000UL
 #define ACK_TIMEOUT_MS          2000UL
 #define PUBLISH_RATE_LIMIT_MS     50UL // max 20 msgs/sec
+
+// OTA. This is deliberately synchronous: the whole
+// download+flash runs inside mqttCallback() on the network task (core 0),
+// blocking MQTT keepalive/ACK processing for its duration. RFID/relay
+// handling (handleRFID/handleExitButton, core 1) is completely unaffected -
+// the door keeps working normally during an update, which is the guarantee
+// that actually matters. A lapsed keepalive just triggers the existing
+// reconnect-with-backoff afterward, already self-healing.
+#define OTA_CHUNK_SIZE           512
+#define OTA_STALL_TIMEOUT_MS   10000UL // no bytes received for this long -> abort
+#define OTA_TOTAL_TIMEOUT_MS   60000UL // whole download taking longer than this -> abort
 
 // Persistent queue
 #define EVENT_FILE "/events.bin"
@@ -128,7 +140,7 @@ IPAddress deviceIP(192, 168, 11, 155);
 IPAddress dnsIP(192, 168, 10, 1);
 IPAddress gatewayIP(192, 168, 10, 1);
 IPAddress subnetMask(255, 255, 254, 0);
-IPAddress mqttServer(192, 168, 10, 250);
+IPAddress mqttServer(192, 168, 11, 66);
 const uint16_t MQTT_PORT = 1883;
 
 // Topics
@@ -531,6 +543,172 @@ bool logAccess(const DateTime& now, const uint8_t* uidBytes, uint8_t uidLen, uin
 }
 
 // ============================================================
+// 8a. OTA FIRMWARE UPDATE
+// ============================================================
+// Splits "http://host[:port]/path" into its parts. TLS isn't supported here,
+// matching MQTT's own current lack of TLS (FR-17 also still pending) - both
+// are fine for a private LAN, neither is fine to expose beyond one.
+// Uses String since this runs once per OTA attempt (a rare, deliberately
+// triggered admin action), not per-scan - the heap-fragmentation risk that
+// ruled String out of the RFID/ACL hot paths doesn't apply here.
+bool parseHttpUrl(const String& url, String& host, uint16_t& port, String& path) {
+    if (!url.startsWith("http://")) return false;
+    String rest = url.substring(7);
+    int slashIdx = rest.indexOf('/');
+    String hostPort = (slashIdx == -1) ? rest : rest.substring(0, slashIdx);
+    path = (slashIdx == -1) ? "/" : rest.substring(slashIdx);
+
+    int colonIdx = hostPort.indexOf(':');
+    if (colonIdx == -1) {
+        host = hostPort;
+        port = 80;
+    } else {
+        host = hostPort.substring(0, colonIdx);
+        port = (uint16_t)hostPort.substring(colonIdx + 1).toInt();
+    }
+    return host.length() > 0;
+}
+
+// Downloads the firmware at `url` and flashes it via the Update library.
+// expectedMd5 must be exactly 32 hex chars; expectedSize is a sanity check
+// against the server's own record of the file, separate from whatever
+// Content-Length the HTTP response itself reports.
+//
+// Safety model: Update.setMD5() is checked automatically inside Update.end(),
+// and the new partition is only marked bootable if that check (and the write
+// itself) fully succeeds. A corrupted/truncated/wrong-file download leaves
+// the currently-running firmware completely untouched - there is no partial
+// or "maybe corrupt" state the device can end up booting into from this
+// function failing partway through.
+//
+// Known limitation: this verifies the bytes weren't corrupted in transit,
+// not who produced them - there's no code signing here. It also doesn't
+// implement post-boot crash rollback (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+// is a platformio.ini/sdkconfig-level setting, not something this function
+// can control) - if a bad-but-intact binary boots and then crashes, ESP-IDF's
+// default behavior applies, which depends on partition/rollback config this
+// firmware doesn't assume.
+bool performOTA(const String& url, const String& expectedMd5, uint32_t expectedSize) {
+    String host, path;
+    uint16_t port;
+    if (!parseHttpUrl(url, host, port, path)) {
+        Serial.println("OTA: invalid URL (must be http://host[:port]/path).");
+        return false;
+    }
+    if (expectedMd5.length() != 32) {
+        Serial.println("OTA: expected md5 must be 32 hex characters.");
+        return false;
+    }
+
+    EthernetClient otaClient;
+    Serial.printf("OTA: connecting to %s:%u\n", host.c_str(), port);
+    if (!otaClient.connect(host.c_str(), port)) {
+        Serial.println("OTA: connection failed.");
+        return false;
+    }
+
+    otaClient.printf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path.c_str(), host.c_str());
+
+    // --- Read status line + headers ---
+    unsigned long headerWaitStart = millis();
+    String statusLine = otaClient.readStringUntil('\n');
+    if (statusLine.indexOf(" 200 ") == -1) {
+        Serial.printf("OTA: unexpected HTTP status: %s\n", statusLine.c_str());
+        otaClient.stop();
+        return false;
+    }
+
+    long contentLength = -1;
+    while (otaClient.connected() && (millis() - headerWaitStart < OTA_STALL_TIMEOUT_MS)) {
+        String line = otaClient.readStringUntil('\n');
+        if (line.startsWith("Content-Length:")) {
+            contentLength = line.substring(16).toInt();
+        }
+        if (line == "\r" || line.length() == 0) break; // blank line = end of headers
+    }
+
+    if (contentLength <= 0) {
+        Serial.println("OTA: missing/invalid Content-Length.");
+        otaClient.stop();
+        return false;
+    }
+    if (expectedSize > 0 && (uint32_t)contentLength != expectedSize) {
+        // Not necessarily fatal (the server's stored metadata could be
+        // stale), but worth surfacing rather than silently trusting either
+        // number - proceed using what the HTTP response itself reports,
+        // since that's what will actually be written.
+        Serial.printf("OTA: WARNING - server said size=%u, Content-Length=%ld. Using Content-Length.\n",
+                      expectedSize, contentLength);
+    }
+
+    if (!Update.begin(contentLength)) {
+        Serial.printf("OTA: Update.begin() failed: %s\n", Update.errorString());
+        otaClient.stop();
+        return false;
+    }
+    if (!Update.setMD5(expectedMd5.c_str())) {
+        Serial.println("OTA: Update.setMD5() rejected the provided hash.");
+        Update.abort();
+        otaClient.stop();
+        return false;
+    }
+
+    // --- Stream body straight into flash ---
+    uint8_t buf[OTA_CHUNK_SIZE];
+    uint32_t totalWritten = 0;
+    unsigned long lastDataMs = millis();
+    unsigned long downloadStart = millis();
+
+    while (totalWritten < (uint32_t)contentLength) {
+        esp_task_wdt_reset(); // this loop can easily run longer than the 10s WDT timeout
+
+        if (millis() - downloadStart > OTA_TOTAL_TIMEOUT_MS) {
+            Serial.println("OTA: overall timeout exceeded, aborting.");
+            Update.abort();
+            otaClient.stop();
+            return false;
+        }
+
+        int available = otaClient.available();
+        if (available > 0) {
+            int toRead = min(available, (int)sizeof(buf));
+            int len = otaClient.read(buf, toRead);
+            if (len > 0) {
+                if (Update.write(buf, len) != (size_t)len) {
+                    Serial.printf("OTA: flash write failed: %s\n", Update.errorString());
+                    Update.abort();
+                    otaClient.stop();
+                    return false;
+                }
+                totalWritten += len;
+                lastDataMs = millis();
+            }
+        } else if (!otaClient.connected()) {
+            Serial.println("OTA: connection closed before download completed.");
+            Update.abort();
+            otaClient.stop();
+            return false;
+        } else if (millis() - lastDataMs > OTA_STALL_TIMEOUT_MS) {
+            Serial.println("OTA: stalled (no data), aborting.");
+            Update.abort();
+            otaClient.stop();
+            return false;
+        }
+    }
+    otaClient.stop();
+
+    // Update.end(true) finalizes the write AND checks the MD5 set above -
+    // the new partition is only marked bootable if both pass.
+    if (!Update.end(true)) {
+        Serial.printf("OTA: finalize/verify failed: %s\n", Update.errorString());
+        return false;
+    }
+
+    Serial.printf("OTA: success, %u bytes written and verified.\n", totalWritten);
+    return true;
+}
+
+// ============================================================
 // 8. MQTT & NETWORKING
 // ============================================================
 void mqttCallback(String& topic, String& payload) {
@@ -592,6 +770,45 @@ void mqttCallback(String& topic, String& payload) {
             preferences.putUInt("aclVer", 0);
             mqtt.subscribe(TOPIC_ACL, 1);
             mqtt.publish(TOPIC_CMD_RES, "sync_triggered", false, 1);
+
+        } else if (payload.startsWith("{")) {
+            // OTA (and any future structured command) arrives as JSON rather
+            // than a bare word, since it needs more than one piece of data.
+            // The existing open/reboot/sync commands stay plain strings -
+            // this is additive, not a protocol-wide change.
+            JsonDocument cmdDoc;
+            if (deserializeJson(cmdDoc, payload)) {
+                Serial.println("Invalid command JSON.");
+                mqtt.publish(TOPIC_CMD_RES, "cmd_failed_bad_json", false, 1);
+                return;
+            }
+            const char* subCmd = cmdDoc["cmd"] | "";
+
+            if (strcmp(subCmd, "ota") == 0) {
+                String otaUrl = cmdDoc["url"] | "";
+                String otaMd5 = cmdDoc["md5"] | "";
+                uint32_t otaSize = cmdDoc["size"] | 0UL;
+
+                if (otaUrl.length() == 0 || otaMd5.length() != 32) {
+                    mqtt.publish(TOPIC_CMD_RES, "ota_failed_bad_request", false, 1);
+                    return;
+                }
+
+                mqtt.publish(TOPIC_CMD_RES, "ota_downloading", false, 1);
+                bool ok = performOTA(otaUrl, otaMd5, otaSize);
+
+                if (ok) {
+                    mqtt.publish(TOPIC_CMD_RES, "ota_ok_rebooting", false, 1);
+                    // Reuses the same non-blocking reboot path as the "reboot"
+                    // command above, giving this ack a chance to flush first.
+                    rebootPending = true;
+                    rebootRequestedAt = millis();
+                } else {
+                    mqtt.publish(TOPIC_CMD_RES, "ota_failed", false, 1);
+                    // Current firmware is untouched either way - see the
+                    // safety-model note above performOTA().
+                }
+            }
         }
     }
 }

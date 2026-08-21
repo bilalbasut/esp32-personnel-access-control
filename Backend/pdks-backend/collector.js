@@ -153,6 +153,29 @@ client.on('message', async (topic, message) => {
     // --- Process Command Responses ---
     else if (topic.endsWith('/cmd/res')) {
         console.log(`[CMD RESULT] Device ${deviceId} responded: ${payload}`);
+
+        // OTA responses (ota_downloading / ota_ok_rebooting / ota_failed / ...)
+        // get persisted so the panel can show update progress per device,
+        // same pattern as the heartbeat/fw tracking above. Other command
+        // responses (open_ok, rebooting, sync_triggered) are transient
+        // acks with nothing meaningful to store long-term.
+        if (payload.startsWith('ota_')) {
+            const now = Math.floor(Date.now() / 1000);
+            try {
+                await pool.query(
+                    `INSERT INTO devices (id, durum, son_gorulme, ota_status, ota_updated_at)
+                     VALUES ($1, 'online', $2, $3, $2)
+                     ON CONFLICT(id) DO UPDATE SET
+                         durum = 'online',
+                         son_gorulme = EXCLUDED.son_gorulme,
+                         ota_status = EXCLUDED.ota_status,
+                         ota_updated_at = EXCLUDED.ota_updated_at`,
+                    [deviceId, now, payload]
+                );
+            } catch (err) {
+                console.error('OTA status update error:', err);
+            }
+        }
     }
 });
 
