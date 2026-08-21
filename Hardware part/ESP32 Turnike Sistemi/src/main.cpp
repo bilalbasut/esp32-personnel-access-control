@@ -144,6 +144,13 @@ const char* TOPIC_CMD_RES = "pdks/merkez/dev/GATE-K3-01/cmd/res";
 uint32_t readPointer = 0, writePointer = 0, globalSequence = 0;
 uint32_t currentAclVersion = 0, queueCount = 0;
 uint32_t queueOverflowCount = 0; // number of unacked records evicted to make room
+// Set by the remote "reboot" command; consumed non-blockingly in the network
+// task loop. The rest of this firmware deliberately never calls delay() (see
+// project spec section 2.1/9 - it breaks MQTT keepalive and RFID responsiveness),
+// so a reboot request can't just block for 500ms waiting for "rebooting" to
+// flush onto the wire either.
+volatile bool rebootPending = false;
+unsigned long rebootRequestedAt = 0;
 uint32_t eventsSinceCheckpoint = 0, acksSinceCheckpoint = 0;
 std::vector<AclRecord> aclList;
 
@@ -539,23 +546,52 @@ void mqttCallback(String& topic, String& payload) {
         Serial.println("Remote command received: " + payload);
         
         if (payload == "open") {
+            // Write before actuate, same as every card scan (handleRFID) and
+            // the exit button (handleExitButton) - the project's core rule is
+            // that a record must never wait in RAM while the relay has
+            // already fired, since a power loss in between would lose the
+            // event with no trace it ever happened. The previous order here
+            // (grantAccess() then logAccess()) inverted that for exactly this
+            // one path.
+            static const uint8_t remoteUid[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+            bool logged = logAccess(rtc.now(), remoteUid, 7, DIR_IN, RESULT_MANUAL);
+
+            // This is a deliberate operator action, not an unauthenticated
+            // scan - still open the door even if the audit write failed
+            // (e.g. a rare double-fault with the queue), but say so clearly
+            // rather than silently reporting "open_ok" either way.
             grantAccess();
-            // Log this as a manual entry in the database just like the exit button
-            static const uint8_t remoteUid[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}; 
-            logAccess(rtc.now(), remoteUid, 7, DIR_IN, RESULT_MANUAL);
-            mqtt.publish(TOPIC_CMD_RES, "open_ok", false, 1);
+            mqtt.publish(TOPIC_CMD_RES, logged ? "open_ok" : "open_ok_unlogged", false, 1);
+            if (!logged) Serial.println("WARNING: Remote open succeeded but the event was not logged.");
             
         } else if (payload == "reboot") {
             mqtt.publish(TOPIC_CMD_RES, "rebooting", false, 1);
-            delay(500); // Give MQTT time to push the message out
-            ESP.restart(); // Hardware reboot
+            // Actual restart happens non-blockingly in the network task loop,
+            // giving the MQTT client a chance to flush "rebooting" onto the
+            // wire first - see the note by rebootPending's declaration for
+            // why this can't just be a delay(500) here.
+            rebootPending = true;
+            rebootRequestedAt = millis();
             
         } else if (payload == "sync") {
-            // Force a re-download of the ACL by tricking the device into thinking it has version 0
+            // Zeroing currentAclVersion alone was a no-op while connected: it
+            // only takes effect on the *next* genuinely new ACL publish from
+            // the panel, or the *next* reconnect - neither of which is
+            // "on-demand" the way this command is supposed to be. Retained
+            // messages are only (re)delivered on a SUBSCRIBE packet, and this
+            // device was already subscribed, so nothing was actually
+            // triggered to be resent.
+            // Re-subscribing fixes that: per the MQTT spec, a SUBSCRIBE -
+            // even to a topic the client is already subscribed to - always
+            // redelivers that topic's current retained message. Combined with
+            // zeroing the version (so whatever comes back is guaranteed to be
+            // treated as newer, forcing a genuine re-parse even if the
+            // version number turns out unchanged), this recovers from a
+            // corrupted or stale local copy, not just "fetch it if newer".
             currentAclVersion = 0;
             preferences.putUInt("aclVer", 0);
+            mqtt.subscribe(TOPIC_ACL, 1);
             mqtt.publish(TOPIC_CMD_RES, "sync_triggered", false, 1);
-            // The broker will automatically push the retained ACL message again shortly
         }
     }
 }
@@ -906,6 +942,16 @@ void networkTaskCode(void* parameter) {
     for (;;) {
         esp_task_wdt_reset(); // Feed the watchdog
         unsigned long now = millis();
+
+        // Non-blocking counterpart to the removed delay(500) before ESP.restart():
+        // give the "rebooting" ack ~500ms to actually flush onto the wire via
+        // mqtt.loop() below on prior iterations, then restart. Checked every
+        // iteration of this loop (short period), so the actual delay past 500ms
+        // is negligible.
+        if (rebootPending && (now - rebootRequestedAt >= 500)) {
+            ESP.restart();
+        }
+
         Ethernet.maintain();
 
         if (Ethernet.linkStatus() == LinkON) {
