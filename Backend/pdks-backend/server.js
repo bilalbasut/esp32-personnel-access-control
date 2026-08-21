@@ -45,6 +45,23 @@ function formatWindow(startM, endM) {
     return `${toHHMM(s)}-${toHHMM(e === 1440 ? 1439 : e)}`;
 }
 
+// Shared validation for floors + time-window fields, used by every endpoint
+// that creates or fully specifies a card's access rules. Returns an error
+// message string, or null if the input is valid.
+function validateFloorsAndWindow(floors, windowStart, windowEnd) {
+    // Firmware stores floor numbers in a 32-bit bitmask and silently drops any
+    // floor >= 32 (`if (floorNum < 32) ...`) - reject bad input here instead of
+    // letting it fail invisibly on-device.
+    const floorList = parseFloors(floors);
+    if (floorList.some((f) => f < 0 || f > 31)) {
+        return 'floors must be between 0 and 31.';
+    }
+    if (windowStart < 0 || windowStart > 1440 || windowEnd < 0 || windowEnd > 1440 || windowStart >= windowEnd) {
+        return 'win_start_m must be less than win_end_m, both within 0-1440.';
+    }
+    return null;
+}
+
 // --- HELPER FUNCTION: AUTOMATED ACL PUBLISHER ---
 // Builds the JSON payload the ESP32 firmware actually needs and pushes it
 // to the broker as a retained message.
@@ -159,6 +176,156 @@ app.get('/api/cards', async (req, res) => {
     }
 });
 
+// GET: Employee list, independent of whether they have a card yet - the old
+// /api/cards list starts FROM cards, so an employee with no card at all
+// never appeared anywhere. This is the list a "Personnel" screen assigns
+// cards from.
+app.get('/api/employees', async (req, res) => {
+    try {
+        const query = `
+            SELECT e.id, e.ad_soyad, e.departman, e.aktif, c.uid AS card_uid
+            FROM employees e
+            LEFT JOIN cards c ON c.employee_id = e.id
+            ORDER BY e.ad_soyad ASC
+        `;
+        const result = await pool.query(query);
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// POST: Create an employee with no card yet (e.g. a new hire before their
+// card has arrived or been assigned). Use PUT /api/cards/:uid/assign
+// afterward to link them to a card.
+app.post('/api/employees', async (req, res) => {
+    const { ad_soyad, departman } = req.body;
+    if (!ad_soyad) {
+        return res.status(400).json({ error: 'ad_soyad is required.' });
+    }
+    try {
+        const result = await pool.query(
+            'INSERT INTO employees (ad_soyad, departman) VALUES ($1, $2) RETURNING id, ad_soyad, departman, aktif',
+            [ad_soyad, departman || null]
+        );
+        res.json(result.rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// POST: Register a physical card with no owner yet (inventory/spare cards -
+// cards get reissued in practice, not destroyed, so having a pool of
+// unassigned cards on hand is the normal case, not an edge case). Link it to
+// someone later with PUT /api/cards/:uid/assign.
+//
+// If employee_id is provided at creation time, the card activates
+// immediately (aktif=1); if not, it's created inactive (aktif=0) so an
+// unclaimed card sitting in a drawer can't open doors for whoever happens to
+// be holding it. Pass aktif explicitly to override either default.
+app.post('/api/cards', async (req, res) => {
+    const { uid, employee_id, floors, valid_from, valid_to, win_start_m, win_end_m, aktif } = req.body;
+    if (!uid) {
+        return res.status(400).json({ error: 'uid is required.' });
+    }
+
+    const normalizedUid = String(uid).trim().toUpperCase();
+    const windowStart = Number.isFinite(win_start_m) ? win_start_m : 0;
+    const windowEnd = Number.isFinite(win_end_m) ? win_end_m : 1440;
+    const normalizedEmployeeId = Number.isInteger(employee_id) ? employee_id : null;
+    const cardAktif = aktif !== undefined ? (aktif ? 1 : 0) : (normalizedEmployeeId !== null ? 1 : 0);
+
+    const validationError = validateFloorsAndWindow(floors, windowStart, windowEnd);
+    if (validationError) {
+        return res.status(400).json({ error: validationError });
+    }
+
+    try {
+        await pool.query(
+            `INSERT INTO cards (uid, employee_id, floors, valid_from, valid_to, win_start_m, win_end_m, aktif)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [
+                normalizedUid,
+                normalizedEmployeeId,
+                Array.isArray(floors) ? floors.join(',') : (floors || ''),
+                valid_from || null,
+                valid_to || null,
+                windowStart,
+                windowEnd,
+                cardAktif,
+            ]
+        );
+
+        if (cardAktif === 1) {
+            await publishAclUpdate();
+        }
+
+        res.json({ message: `Card ${normalizedUid} registered.`, aktif: cardAktif });
+    } catch (err) {
+        if (err.code === '23505') {
+            return res.status(409).json({ error: `Card UID ${normalizedUid} is already registered.` });
+        }
+        if (err.code === '23503') {
+            return res.status(400).json({ error: 'employee_id does not exist.' });
+        }
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// PUT: Link (or unlink) a card to/from an employee. Usable from either
+// direction in the panel - the employee list ("give this person a card") or
+// the card list ("assign this card to someone") - since both end up calling
+// this same operation with a uid and an employee_id.
+//
+// employee_id has NO effect on what's sent to the device - the ACL payload
+// (uid, floors, valid_to, win) never includes it, only aktif/floors/window/
+// expiry do. So linking/unlinking is purely a server-side bookkeeping change
+// (whose name shows up on the live feed and PDKS report for this uid), and
+// does not by itself require reaching the hardware.
+//
+// It does, by default, flip aktif alongside the link: linking to a real
+// employee activates the card, unlinking deactivates it. An active card with
+// no linked owner would still physically open doors for whoever holds it,
+// which is worth avoiding by default. Pass aktif explicitly to override -
+// e.g. link a card to a new hire a few days early while keeping it dormant
+// until their start date.
+app.put('/api/cards/:uid/assign', async (req, res) => {
+    const normalizedUid = String(req.params.uid).trim().toUpperCase();
+    const { employee_id } = req.body;
+
+    if (employee_id !== null && employee_id !== undefined && !Number.isInteger(employee_id)) {
+        return res.status(400).json({ error: 'employee_id must be an integer, or null to unlink.' });
+    }
+
+    const newEmployeeId = employee_id ?? null;
+    const aktif = 'aktif' in req.body ? (req.body.aktif ? 1 : 0) : (newEmployeeId !== null ? 1 : 0);
+
+    try {
+        const result = await pool.query(
+            'UPDATE cards SET employee_id = $1, aktif = $2 WHERE uid = $3 RETURNING uid, employee_id, aktif',
+            [newEmployeeId, aktif, normalizedUid]
+        );
+        if (result.rowCount === 0) {
+            return res.status(404).json({ error: `Card UID ${normalizedUid} not found.` });
+        }
+
+        // aktif may have changed as a side effect of (un)linking, and that
+        // DOES reach the device - republish either way, it's cheap and correct
+        // even on the rare call where aktif didn't actually change.
+        await publishAclUpdate();
+
+        res.json({
+            message: `Card ${normalizedUid} ${newEmployeeId !== null ? 'linked' : 'unlinked'}.`,
+            card: result.rows[0],
+        });
+    } catch (err) {
+        if (err.code === '23503') {
+            return res.status(400).json({ error: 'employee_id does not exist.' });
+        }
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // Timezone used to bucket events into calendar days for the PDKS report.
 // Records are stored in UTC (per spec 5.3); grouping by raw UTC day would
 // misfile a shift that starts just after local midnight into the wrong day,
@@ -255,12 +422,9 @@ app.post('/api/cards/add', async (req, res) => {
     // Firmware stores floor numbers in a 32-bit bitmask and silently drops any
     // floor >= 32 (`if (floorNum < 32) ...`) - reject bad input here instead of
     // letting it fail invisibly on-device.
-    const floorList = parseFloors(floors);
-    if (floorList.some((f) => f < 0 || f > 31)) {
-        return res.status(400).json({ error: 'floors must be between 0 and 31.' });
-    }
-    if (windowStart < 0 || windowStart > 1440 || windowEnd < 0 || windowEnd > 1440 || windowStart >= windowEnd) {
-        return res.status(400).json({ error: 'win_start_m must be less than win_end_m, both within 0-1440.' });
+    const validationError = validateFloorsAndWindow(floors, windowStart, windowEnd);
+    if (validationError) {
+        return res.status(400).json({ error: validationError });
     }
 
     // A single dedicated client is required for a real transaction - pool.query()
