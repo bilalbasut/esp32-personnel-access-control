@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import { api } from '../api';
 import { usePolling } from '../hooks/usePolling';
 import { formatDateTime, resultLabel, formatDirection, isDeviceOnline, toNumber } from '../utils/format';
@@ -17,23 +18,32 @@ function StatCard({ label, value, sublabel }) {
 }
 
 function Dashboard() {
-  // Fast: the live feed itself.
   const { events = [], devices = [], error, loading } = usePolling(
     () => Promise.all([api.getEvents(), api.getDevices()]).then(([events, devices]) => ({ events, devices })),
     3000
   );
-  // Slow: counts that change rarely (new hires, new cards) - no need to
-  // re-fetch every 3s alongside the live feed.
+  
   const { employees = [], cards = [] } = usePolling(
     () => Promise.all([api.getEmployees(), api.getCards()]).then(([employees, cards]) => ({ employees, cards })),
     20000
   );
 
-  const now = Math.floor(Date.now() / 1000);
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(Date.now());
+    }, 3000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const now = Math.floor(currentTime / 1000);
   const onlineCount = devices.filter((d) => isDeviceOnline(d, now)).length;
   const activeCardCount = cards.filter((c) => Number(c.aktif) === 1).length;
-  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-  const eventsToday = events.filter((e) => toNumber(e.ts_utc, 0) >= Math.floor(todayStart.getTime() / 1000)).length;
+  const todayStart = new Date(currentTime); 
+  todayStart.setHours(0, 0, 0, 0);
+  const startTs = Math.floor(todayStart.getTime() / 1000);
+  const eventsToday = events.filter((e) => toNumber(e.ts_utc, 0) >= startTs).length;
 
   return (
     <div>

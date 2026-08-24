@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { api } from '../api';
 import { usePolling } from '../hooks/usePolling';
 import { useActionStatus } from '../hooks/useActionStatus';
@@ -9,9 +9,10 @@ import { formatDateTime, formatBytes, isDeviceOnline } from '../utils/format';
 // inline "push this firmware version" selector. Kept as its own component
 // so each row manages its own "which version is selected" state
 // independently.
-function DeviceRow({ device, firmwareVersions, onCommand, onOta }) {
+function DeviceRow({ device, firmwareVersions, onCommand, onOta, now }) {
   const [selectedVersion, setSelectedVersion] = useState('');
-  const now = Math.floor(Date.now() / 1000);
+  
+  // FIX: now is passed as a prop from the parent component
   const online = isDeviceOnline(device, now);
 
   return (
@@ -85,6 +86,19 @@ function Devices() {
   const { firmware = [] } = usePolling(() => api.getFirmware().then((firmware) => ({ firmware })), 15000);
   const { status, run, dismiss } = useActionStatus();
 
+  // Centralize time state in the parent component
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
+
+  useEffect(() => {
+    // Update the time every 4 seconds to match device polling
+    const timer = setInterval(() => {
+      setCurrentTime(Date.now());
+    }, 4000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const now = Math.floor(currentTime / 1000);
+
   const handleCommand = (id, cmd) => {
     run(() => api.sendDeviceCommand(id, cmd), `'${cmd}' sent to ${id}.`);
   };
@@ -125,6 +139,7 @@ function Devices() {
                   firmwareVersions={firmware}
                   onCommand={handleCommand}
                   onOta={handleOta}
+                  now={now} // Pass the deterministic time down as a prop
                 />
               ))}
             </tbody>

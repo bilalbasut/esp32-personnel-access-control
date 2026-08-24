@@ -16,7 +16,10 @@ export function usePolling(fetchFn, intervalMs = 3000) {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
   const fetchFnRef = useRef(fetchFn);
-  fetchFnRef.current = fetchFn;
+
+  useEffect(() => {
+    fetchFnRef.current = fetchFn;
+  }, [fetchFn]);
 
   const refresh = useCallback(async () => {
     try {
@@ -55,7 +58,7 @@ export function usePolling(fetchFn, intervalMs = 3000) {
     };
     // intervalMs intentionally omitted - changing it isn't expected at
     // runtime for any current page, and refresh() covers the manual case.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // slint-disable-next-line react-hooks/exhaustive-deps
   }, [intervalMs]);
 
   return { ...data, error, loading, refresh };
