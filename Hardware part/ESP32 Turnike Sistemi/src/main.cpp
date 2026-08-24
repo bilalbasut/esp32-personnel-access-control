@@ -1172,11 +1172,17 @@ void networkTaskCode(void* parameter) {
         Ethernet.maintain();
 
         if (Ethernet.linkStatus() == LinkON) {
-            timeClient.update();
-            if (timeClient.isTimeSet() && (lastNtpSync == 0 || now - lastNtpSync >= NTP_SYNC_INTERVAL_MS)) {
-                rtc.adjust(DateTime(timeClient.getEpochTime()));
-                currentTimeSource = TSRC_NTP;
-                lastNtpSync = now;
+            // Manually enforce the NTP interval to prevent DNS blocking loops
+            static unsigned long lastNtpAttempt = 0;
+            if (lastNtpAttempt == 0 || now - lastNtpAttempt >= NTP_SYNC_INTERVAL_MS) {
+                lastNtpAttempt = now; // Update this immediately, regardless of success
+                timeClient.update();
+                
+                if (timeClient.isTimeSet()) {
+                    rtc.adjust(DateTime(timeClient.getEpochTime()));
+                    currentTimeSource = TSRC_NTP;
+                    lastNtpSync = now;
+                }
             }
 
             if (!mqtt.connected()) {
