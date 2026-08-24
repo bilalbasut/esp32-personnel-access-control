@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const cors = require('cors');
 const mqtt = require('mqtt');
 const crypto = require('crypto');
 const path = require('path');
@@ -7,6 +8,13 @@ const fs = require('fs');
 const pool = require('./db');
 
 const app = express();
+// Needed because the React dev server (Vite/CRA) typically runs on a
+// different port than this server - without this, every relative
+// fetch('/api/...') from the panel silently resolves against the frontend's
+// own dev server instead of here, and just 404s there instead of ever
+// reaching this code. Harmless to leave enabled in production too, since
+// this API has no cookie/session auth for CORS to weaken.
+app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
@@ -357,15 +365,24 @@ function csvField(value) {
 
 // GET: Date-range PDKS Report with optional CSV export
 app.get('/api/reports/pdks', async (req, res) => {
-    const { start_ts, end_ts, format } = req.query;
+    const { start_ts, end_ts, format, employee_id } = req.query;
     
     if (!start_ts || !end_ts) {
         return res.status(400).json({ error: 'start_ts and end_ts (Unix timestamps) are required.' });
     }
 
+    let employeeIdFilter = null;
+    if (employee_id !== undefined && employee_id !== '') {
+        employeeIdFilter = Number(employee_id);
+        if (!Number.isInteger(employeeIdFilter)) {
+            return res.status(400).json({ error: 'employee_id must be an integer.' });
+        }
+    }
+
     try {
         const query = `
             SELECT 
+                e.id AS employee_id,
                 e.ad_soyad, 
                 e.departman,
                 TO_CHAR(TO_TIMESTAMP(a.ts_utc) AT TIME ZONE $3, 'YYYY-MM-DD') as working_date,
@@ -381,7 +398,8 @@ app.get('/api/reports/pdks', async (req, res) => {
             FROM access_events a
             JOIN employees e ON a.employee_id = e.id
             WHERE a.ts_utc >= $1 AND a.ts_utc <= $2
-            GROUP BY e.ad_soyad, e.departman, working_date
+              AND ($4::int IS NULL OR a.employee_id = $4::int)
+            GROUP BY e.id, e.ad_soyad, e.departman, working_date
             ORDER BY working_date DESC, e.ad_soyad ASC
         `;
         // Entries are still restricted to result=0 (granted) inside the FILTER
@@ -392,7 +410,7 @@ app.get('/api/reports/pdks', async (req, res) => {
         // exit row before aggregation even ran, so MAX(ts_utc) was silently
         // computed over entries only - "last exit" was really "latest entry",
         // collapsing duration to 0 whenever there was only one entry that day.
-        const result = await pool.query(query, [start_ts, end_ts, REPORT_TZ]);
+        const result = await pool.query(query, [start_ts, end_ts, REPORT_TZ, employeeIdFilter]);
 
         // Handle CSV Export
         if (format === 'csv') {
