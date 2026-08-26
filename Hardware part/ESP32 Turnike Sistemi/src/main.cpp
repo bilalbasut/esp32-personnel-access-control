@@ -169,56 +169,14 @@ std::vector<AclRecord> aclList;
 // FreeRTOS Synchronization
 portMUX_TYPE queueMux = portMUX_INITIALIZER_UNLOCKED;
 SemaphoreHandle_t aclMutex = NULL;
-// Protects Wire/I2C access to the RTC, now touched from two genuinely
-// independent tasks (the RFID scan path on core 1, and the dedicated NTP
-// task on core 0) - Wire isn't documented as safe for concurrent access
-// across FreeRTOS tasks without this.
-SemaphoreHandle_t rtcMutex = NULL;
 
 // Helper comparator for sorting and binary search
 bool compareAclRecords(const AclRecord& a, const AclRecord& b) {
     if (a.uidLen != b.uidLen) return a.uidLen < b.uidLen;
     return memcmp(a.uid, b.uid, a.uidLen) < 0;
 }
-// Written from both networkTaskCode (link-down fallback) and the dedicated
-// ntpTaskCode (successful sync) - volatile ensures neither task nor the
-// compiler caches a stale value across that boundary.
-volatile uint8_t currentTimeSource = TSRC_RTC;
+uint8_t currentTimeSource = TSRC_RTC;
 unsigned long lastNtpSync = 0;
-
-// All RTC (I2C/Wire) access goes through these two wrappers rather than
-// calling rtc.now()/rtc.adjust() directly - see rtcMutex's declaration
-// above. Defined here, immediately after rtc/rtcMutex, and before every
-// function in this file that touches the RTC - this is a plain .cpp under
-// PlatformIO, not a .ino sketch, so there's no automatic forward-declaration
-// generation; a function has to be visible above its first use or the
-// compiler can't see it. (That's exactly what broke last time - these were
-// defined too far down the file.)
-// 50ms timeout is generous relative to how fast an actual I2C register
-// read/write completes (microseconds); if it's ever genuinely exceeded,
-// proceed unprotected rather than returning a bogus DateTime, and say so -
-// true contention this brief should be unreachable in practice.
-DateTime rtcNowSafe() {
-    DateTime result;
-    if (xSemaphoreTake(rtcMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        result = rtc.now();
-        xSemaphoreGive(rtcMutex);
-    } else {
-        Serial.println("WARNING: rtcMutex contended, reading RTC unprotected.");
-        result = rtc.now();
-    }
-    return result;
-}
-
-void rtcAdjustSafe(const DateTime& dt) {
-    if (xSemaphoreTake(rtcMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        rtc.adjust(dt);
-        xSemaphoreGive(rtcMutex);
-    } else {
-        Serial.println("WARNING: rtcMutex contended, adjusting RTC unprotected.");
-        rtc.adjust(dt);
-    }
-}
 
 // Hardware & Debounce State
 bool isRelayActive = false, isSuccessBeepActive = false, isDenySequenceActive = false;
@@ -774,7 +732,7 @@ void mqttCallback(String& topic, String& payload) {
             // (grantAccess() then logAccess()) inverted that for exactly this
             // one path.
             static const uint8_t remoteUid[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-            bool logged = logAccess(rtcNowSafe(), remoteUid, 7, DIR_IN, RESULT_MANUAL);
+            bool logged = logAccess(rtc.now(), remoteUid, 7, DIR_IN, RESULT_MANUAL);
 
             // This is a deliberate operator action, not an unauthenticated
             // scan - still open the door even if the audit write failed
@@ -989,7 +947,7 @@ void handleExitButton() {
             stableExitButtonState = reading;
             if (stableExitButtonState == LOW && !isRelayActive) {
                 static const uint8_t zeroUid[7] = {0};
-                if (logAccess(rtcNowSafe(), zeroUid, 7, DIR_OUT, RESULT_MANUAL)) {
+                if (logAccess(rtc.now(), zeroUid, 7, DIR_OUT, RESULT_MANUAL)) {
                     grantAccess();
                     Serial.println("EXIT BUTTON -> GRANTED");
                 } else {
@@ -1027,9 +985,9 @@ void handleRFID() {
     Serial.print("RFID UID: ");
     Serial.println(uidHex);
 
-    uint8_t resultCode = evaluateAccess(uidBytes, uidLen, rtcNowSafe());
+    uint8_t resultCode = evaluateAccess(uidBytes, uidLen, rtc.now());
 
-    if (logAccess(rtcNowSafe(), uidBytes, uidLen, DIR_IN, resultCode)) {
+    if (logAccess(rtc.now(), uidBytes, uidLen, DIR_IN, resultCode)) {
         if (resultCode == RESULT_GRANTED) {
             grantAccess();
         } else {
@@ -1056,7 +1014,7 @@ void initRTC() {
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     if (!rtc.begin()) { Serial.println("ERROR: PCF8563 missing."); currentTimeSource = TSRC_INVALID; return; }
     if (rtc.lostPower()) {
-        rtcAdjustSafe(DateTime(F(__DATE__), F(__TIME__)));
+        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
         currentTimeSource = TSRC_INVALID;
     } else {
         currentTimeSource = TSRC_RTC;
@@ -1178,7 +1136,6 @@ void initMQTT() {
     mqtt.onMessage(mqttCallback);
     mqtt.setWill(TOPIC_STATUS, "offline", true, 1);
 }
-
 
 // ============================================================
 // 11. NETWORK TASK (Core 0)
@@ -1337,7 +1294,6 @@ void setup() {
 
     // Initialize the ACL Mutex
     aclMutex = xSemaphoreCreateMutex();
-    rtcMutex = xSemaphoreCreateMutex();
 
     loadAclToRAM();
     initRTC();
@@ -1345,9 +1301,6 @@ void setup() {
     rebuildQueueState();
 
     xTaskCreatePinnedToCore(networkTaskCode, "NetworkTask", 12000, nullptr, 1, &NetworkTask, 0);
-    // Separate, low-priority task so NTP's occasional multi-second blocking
-    // (DNS lookup + UDP wait) can never delay networkTaskCode's MQTT/command
-    // handling - see the comment above ntpTaskCode() for the full reasoning.
     Serial.println("Setup complete.");
 }
 
