@@ -23,7 +23,7 @@
 // ============================================================
 // 1. CONFIGURATION
 // ============================================================
-#define FW_VERSION "1.6.0"
+#define FW_VERSION "1.6.1"
 #define DEVICE_ID "GATE-K3-01"
 #define FLOOR_NUMBER 3
 
@@ -60,13 +60,14 @@
 #define HEARTBEAT_INTERVAL_MS  30000UL
 #define NTP_SYNC_INTERVAL_MS 3600000UL
 #define ACK_TIMEOUT_MS          2000UL
-#define PUBLISH_RATE_LIMIT_MS     50UL // max 20 msgs/sec
+#define PUBLISH_RATE_LIMIT_MS     50UL
 
+// OTA Constants
 #define OTA_CHUNK_SIZE           512
 #define OTA_STALL_TIMEOUT_MS   10000UL
 #define OTA_TOTAL_TIMEOUT_MS   60000UL
 
-// Persistent queue
+// Persistent Queue
 #define EVENT_FILE "/events.bin"
 #define MAX_EVENTS 20000
 #define RECORD_SIZE 32
@@ -110,7 +111,7 @@ enum ResultCode : uint8_t { RESULT_GRANTED = 0, RESULT_UNKNOWN = 1, RESULT_EXPIR
 enum TimeSource : uint8_t { TSRC_NTP = 0, TSRC_RTC = 1, TSRC_INVALID = 2 };
 
 // ============================================================
-// 3. GLOBAL OBJECTS & THREAD SYNCHRONIZATION
+// 3. GLOBAL OBJECTS & STATE
 // ============================================================
 Preferences preferences;
 RTC_PCF8563 rtc;
@@ -154,41 +155,14 @@ unsigned long rebootRequestedAt = 0;
 uint32_t eventsSinceCheckpoint = 0, acksSinceCheckpoint = 0;
 std::vector<AclRecord> aclList;
 
-// FreeRTOS Mutexes
+// FreeRTOS Synchronization
 portMUX_TYPE queueMux = portMUX_INITIALIZER_UNLOCKED;
 SemaphoreHandle_t aclMutex = NULL;
 SemaphoreHandle_t rtcMutex = NULL;
 
+DateTime cachedRtcTime(2026, 1, 1, 0, 0, 0);
 volatile uint8_t currentTimeSource = TSRC_RTC;
 unsigned long lastNtpSync = 0;
-
-// Thread-safe I2C/RTC wrappers
-DateTime rtcNowSafe() {
-    DateTime result;
-    if (xSemaphoreTake(rtcMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        result = rtc.now();
-        xSemaphoreGive(rtcMutex);
-    } else {
-        Serial.println("WARNING: rtcMutex contended, reading RTC unprotected.");
-        result = rtc.now();
-    }
-    return result;
-}
-
-void rtcAdjustSafe(const DateTime& dt) {
-    if (xSemaphoreTake(rtcMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        rtc.adjust(dt);
-        xSemaphoreGive(rtcMutex);
-    } else {
-        Serial.println("WARNING: rtcMutex contended, adjusting RTC unprotected.");
-        rtc.adjust(dt);
-    }
-}
-
-bool compareAclRecords(const AclRecord& a, const AclRecord& b) {
-    if (a.uidLen != b.uidLen) return a.uidLen < b.uidLen;
-    return memcmp(a.uid, b.uid, a.uidLen) < 0;
-}
 
 // Hardware & Debounce State
 bool isRelayActive = false, isSuccessBeepActive = false, isDenySequenceActive = false;
@@ -208,8 +182,31 @@ volatile bool aclMessageReceived = false;
 String pendingAclPayload;
 
 // ============================================================
-// 4. HELPERS (CRC, UID, Formatting)
+// 4. HELPERS (CRC, UID, Formatting, Thread-Safe RTC)
 // ============================================================
+DateTime rtcNowSafe() {
+    DateTime result;
+    if (xSemaphoreTake(rtcMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        result = rtc.now();
+        cachedRtcTime = result;
+        xSemaphoreGive(rtcMutex);
+    } else {
+        Serial.println("WARNING: rtcMutex contended, returning cached timestamp.");
+        result = cachedRtcTime;
+    }
+    return result;
+}
+
+void rtcAdjustSafe(const DateTime& dt) {
+    if (xSemaphoreTake(rtcMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        rtc.adjust(dt);
+        cachedRtcTime = dt;
+        xSemaphoreGive(rtcMutex);
+    } else {
+        Serial.println("WARNING: rtcMutex contended, skipping RTC adjustment.");
+    }
+}
+
 uint16_t calculateCRC16(const uint8_t* data, size_t length) {
     uint16_t crc = 0xFFFF;
     for (size_t i = 0; i < length; i++) {
@@ -233,6 +230,17 @@ uint8_t hexNibble(char c) {
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     return 0;
+}
+
+bool isValidHex(const char* hex, size_t len) {
+    if (len == 0 || len % 2 != 0 || len > 14) return false;
+    for (size_t i = 0; i < len; i++) {
+        char c = hex[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void hexToBytes(const char* hex, size_t hexLen, uint8_t* byteArray, uint8_t maxLen) {
@@ -266,6 +274,11 @@ const char* directionToText(uint8_t direction) { return direction == DIR_OUT ? "
 const char* modeToText(uint8_t mode) { return mode == 0 ? "online" : "offline"; }
 const char* timeSourceToText(uint8_t source) {
     switch (source) { case TSRC_NTP: return "ntp"; case TSRC_RTC: return "rtc"; default: return "invalid"; }
+}
+
+bool compareAclRecords(const AclRecord& a, const AclRecord& b) {
+    if (a.uidLen != b.uidLen) return a.uidLen < b.uidLen;
+    return memcmp(a.uid, b.uid, a.uidLen) < 0;
 }
 
 // ============================================================
@@ -397,12 +410,6 @@ uint8_t evaluateAccess(const uint8_t* scannedUid, uint8_t uidLen, const DateTime
 // 7. QUEUE MANAGEMENT
 // ============================================================
 uint32_t queueDistance(uint32_t r, uint32_t w) { return (w >= r) ? w - r : (MAX_EVENTS - r + w); }
-bool queueIsFull() { 
-    portENTER_CRITICAL(&queueMux);
-    bool full = (queueCount >= MAX_EVENTS);
-    portEXIT_CRITICAL(&queueMux);
-    return full; 
-}
 
 bool queueIsEmpty() {
     portENTER_CRITICAL(&queueMux);
@@ -477,7 +484,11 @@ void rebuildQueueState() {
     if (readPointer >= MAX_EVENTS) readPointer = 0;
 
     portENTER_CRITICAL(&queueMux);
-    queueCount = queueDistance(readPointer, writePointer);
+    if (readPointer == writePointer && queueCount > 0) {
+        queueCount = min(queueCount, (uint32_t)MAX_EVENTS);
+    } else {
+        queueCount = queueDistance(readPointer, writePointer);
+    }
     if (queueCount > MAX_EVENTS) queueCount = validCount;
     uint32_t safeQueueCount = queueCount;
     portEXIT_CRITICAL(&queueMux);
@@ -489,6 +500,7 @@ void saveCheckpoint(bool force = false) {
     if (!force && eventsSinceCheckpoint < CHECKPOINT_EVENT_INTERVAL && acksSinceCheckpoint < CHECKPOINT_ACK_INTERVAL) return;
     preferences.putUInt("readPtr", readPointer);
     preferences.putUInt("writePtr", writePointer);
+    preferences.putUInt("qCount", queueCount);
     preferences.putUInt("seq", globalSequence);
     preferences.putUInt("aclVer", currentAclVersion);
     eventsSinceCheckpoint = 0; acksSinceCheckpoint = 0;
@@ -498,7 +510,7 @@ bool logAccess(const DateTime& now, const uint8_t* uidBytes, uint8_t uidLen, uin
     bool overwroteOldest = evictOldestIfFull();
     if (overwroteOldest) {
         queueOverflowCount++;
-        Serial.printf("WARNING: Queue full - oldest unacknowledged event overwritten (total overflow=%u)\n", queueOverflowCount);
+        Serial.printf("WARNING: Queue full - oldest event overwritten (total overflow=%u)\n", queueOverflowCount);
     }
 
     AccessRecord record = {};
@@ -679,7 +691,8 @@ void mqttCallback(String& topic, String& payload) {
         
         if (payload == "open") {
             static const uint8_t remoteUid[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-            bool logged = logAccess(rtcNowSafe(), remoteUid, 7, DIR_IN, RESULT_MANUAL);
+            DateTime now = rtcNowSafe();
+            bool logged = logAccess(now, remoteUid, 7, DIR_IN, RESULT_MANUAL);
 
             grantAccess();
             mqtt.publish(TOPIC_CMD_RES, logged ? "open_ok" : "open_ok_unlogged", false, 1);
@@ -734,7 +747,7 @@ bool processPendingAck(bool currentlyWaiting) {
     if (!currentlyWaiting || !ackReceived) return currentlyWaiting;
     ackReceived = false;
 
-    if (queueIsEmpty()) return currentlyWaiting;
+    if (queueIsEmpty()) return false;
     AccessRecord record;
     if (!readEventRecord(readPointer, record) || !isRecordValid(record)) return currentlyWaiting;
 
@@ -789,7 +802,12 @@ void processACLUpdate() {
     JsonDocument doc; 
     if (deserializeJson(doc, pendingAclPayload)) { Serial.println("ACL JSON parse failed."); return; }
 
-    uint32_t newVersion = doc["ver"] | 0UL;
+    if (!doc["ver"].is<uint32_t>() || !doc["cards"].is<JsonArray>()) {
+        Serial.println("ERROR: Malformed ACL payload structure. Aborting update.");
+        return;
+    }
+
+    uint32_t newVersion = doc["ver"].as<uint32_t>();
     if (newVersion <= currentAclVersion) return;
 
     File dbFile = LittleFS.open("/database.tmp", FILE_WRITE);
@@ -797,17 +815,26 @@ void processACLUpdate() {
 
     JsonArray cards = doc["cards"].as<JsonArray>();
     for (JsonVariant card : cards) {
-        AclRecord record = {};
-        
+        if (!card.is<JsonObject>()) continue;
+
         const char* uidCstr = card["uid"] | "";
         size_t uidCstrLen = strlen(uidCstr);
+
+        if (!isValidHex(uidCstr, uidCstrLen)) {
+            Serial.printf("WARNING: Invalid UID '%s' in ACL update. Skipping card.\n", uidCstr);
+            continue;
+        }
+
+        AclRecord record = {};
         record.uidLen = min(uidCstrLen / 2, (size_t)7);
         hexToBytes(uidCstr, uidCstrLen, record.uid, 7);
         
-        JsonArray floors = card["floors"].as<JsonArray>();
-        for (JsonVariant f : floors) {
-            uint8_t floorNum = f.as<uint8_t>();
-            if (floorNum < 32) record.floor_mask |= (1UL << floorNum);
+        if (card["floors"].is<JsonArray>()) {
+            JsonArray floors = card["floors"].as<JsonArray>();
+            for (JsonVariant f : floors) {
+                uint8_t floorNum = f.as<uint8_t>();
+                if (floorNum < 32) record.floor_mask |= (1UL << floorNum);
+            }
         }
         
         record.valid_to = card["valid_to"] | 0xFFFFFFFF; 
@@ -815,8 +842,14 @@ void processACLUpdate() {
         const char* win = card["win"] | "";
         int startH, startM, endH, endM;
         if (strlen(win) == 11 && sscanf(win, "%d:%d-%d:%d", &startH, &startM, &endH, &endM) == 4) {
-            record.win_start_m = (startH * 60) + startM;
-            record.win_end_m = (endH * 60) + endM;
+            if (startH >= 0 && startH < 24 && startM >= 0 && startM < 60 &&
+                endH >= 0 && endH <= 24 && endM >= 0 && endM < 60) {
+                record.win_start_m = (startH * 60) + startM;
+                record.win_end_m = (endH * 60) + endM;
+            } else {
+                record.win_start_m = 0;
+                record.win_end_m = 1440;
+            }
         } else {
             record.win_start_m = 0;
             record.win_end_m = 1440;
@@ -856,7 +889,8 @@ void handleExitButton() {
             stableExitButtonState = reading;
             if (stableExitButtonState == LOW && !isRelayActive) {
                 static const uint8_t zeroUid[7] = {0};
-                if (logAccess(rtcNowSafe(), zeroUid, 7, DIR_OUT, RESULT_MANUAL)) {
+                DateTime now = rtcNowSafe();
+                if (logAccess(now, zeroUid, 7, DIR_OUT, RESULT_MANUAL)) {
                     grantAccess();
                     Serial.println("EXIT BUTTON -> GRANTED");
                 } else {
@@ -893,9 +927,10 @@ void handleRFID() {
     Serial.print("RFID UID: ");
     Serial.println(uidHex);
 
-    uint8_t resultCode = evaluateAccess(uidBytes, uidLen, rtcNowSafe());
+    DateTime now = rtcNowSafe();
+    uint8_t resultCode = evaluateAccess(uidBytes, uidLen, now);
 
-    if (logAccess(rtcNowSafe(), uidBytes, uidLen, DIR_IN, resultCode)) {
+    if (logAccess(now, uidBytes, uidLen, DIR_IN, resultCode)) {
         if (resultCode == RESULT_GRANTED) {
             grantAccess();
         } else {
@@ -929,15 +964,23 @@ void initRTC() {
 }
 
 void initFileSystem() {
-    if (!LittleFS.begin(true)) { Serial.println("ERROR: LittleFS mount failed."); return; }
+    if (!LittleFS.begin(false)) { 
+        Serial.println("ERROR: LittleFS mount failed. Automatic formatting suppressed for safety."); 
+        return; 
+    }
     
+    if (!LittleFS.exists("/database.bin") && LittleFS.exists("/database.bak")) {
+        LittleFS.rename("/database.bak", "/database.bin");
+        Serial.println("RECOVERY: Restored /database.bin from .bak file.");
+    }
+
     if (!LittleFS.exists("/database.bin")) {
         File file = LittleFS.open("/database.bin", FILE_WRITE);
         if (file) file.close(); 
     }
     if (!LittleFS.exists(EVENT_FILE)) { 
         File file = LittleFS.open(EVENT_FILE, FILE_WRITE); 
-        if(file) file.close(); 
+        if (file) file.close(); 
     }
 }
 
@@ -999,18 +1042,15 @@ void networkTaskCode(void* parameter) {
         Ethernet.maintain();
 
         if (Ethernet.linkStatus() == LinkON) {
-            // Dynamic non-blocking NTP interval: 15s until valid, then hourly
             static unsigned long lastNtpAttempt = 0;
             unsigned long ntpInterval = (currentTimeSource == TSRC_NTP) ? NTP_SYNC_INTERVAL_MS : 15000UL;
 
             if (lastNtpAttempt == 0 || now - lastNtpAttempt >= ntpInterval) {
                 lastNtpAttempt = now;
                 
-                // forceUpdate() ensures our manual dynamic interval is respected
                 if (timeClient.forceUpdate()) {
                     unsigned long epoch = timeClient.getEpochTime();
                     
-                    // Sanity check: Epoch between 2025-01-01 and 2035-01-01
                     if (epoch >= 1735689600UL && epoch <= 2051222400UL) {
                         rtcAdjustSafe(DateTime(epoch));
                         currentTimeSource = TSRC_NTP;
@@ -1109,6 +1149,7 @@ void setup() {
     preferences.begin("access_system", false);
     readPointer = preferences.getUInt("readPtr", 0);
     writePointer = preferences.getUInt("writePtr", 0);
+    queueCount = preferences.getUInt("qCount", 0);
     globalSequence = preferences.getUInt("seq", 0);
     currentAclVersion = preferences.getUInt("aclVer", 0);
 
