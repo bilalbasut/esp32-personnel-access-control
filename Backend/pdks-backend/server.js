@@ -160,7 +160,7 @@ app.get('/api/events', async (req, res) => {
             FROM access_events a
             LEFT JOIN cards c ON a.uid = c.uid
             LEFT JOIN employees e ON c.employee_id = e.id
-            ORDER BY a.ts_utc DESC LIMIT 50
+            ORDER BY a.id DESC LIMIT 50
         `;
         const result = await pool.query(query);
         res.json(result.rows);

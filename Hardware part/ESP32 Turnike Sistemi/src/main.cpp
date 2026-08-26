@@ -23,7 +23,7 @@
 // ============================================================
 // 1. CONFIGURATION
 // ============================================================
-#define FW_VERSION "1.4.1"
+#define FW_VERSION "1.5.0"
 #define DEVICE_ID "GATE-K3-01"
 #define FLOOR_NUMBER 3
 
@@ -133,6 +133,7 @@ EthernetClient ethClient;
 
 MQTTClient mqtt(4096);
 TaskHandle_t NetworkTask = nullptr;
+TaskHandle_t NtpTask = nullptr;
 
 // Network Config
 byte mac[] = { 0x00, 0x1A, 0x2B, 0x3C, 0x4D, 0x5E };
@@ -140,7 +141,7 @@ IPAddress deviceIP(192, 168, 11, 155);
 IPAddress dnsIP(192, 168, 10, 1);
 IPAddress gatewayIP(192, 168, 10, 1);
 IPAddress subnetMask(255, 255, 254, 0);
-IPAddress mqttServer(192, 168, 11, 77);
+IPAddress mqttServer(192, 168, 10, 70);
 const uint16_t MQTT_PORT = 1883;
 
 // Topics
@@ -169,14 +170,56 @@ std::vector<AclRecord> aclList;
 // FreeRTOS Synchronization
 portMUX_TYPE queueMux = portMUX_INITIALIZER_UNLOCKED;
 SemaphoreHandle_t aclMutex = NULL;
+// Protects Wire/I2C access to the RTC, now touched from two genuinely
+// independent tasks (the RFID scan path on core 1, and the dedicated NTP
+// task on core 0) - Wire isn't documented as safe for concurrent access
+// across FreeRTOS tasks without this.
+SemaphoreHandle_t rtcMutex = NULL;
 
 // Helper comparator for sorting and binary search
 bool compareAclRecords(const AclRecord& a, const AclRecord& b) {
     if (a.uidLen != b.uidLen) return a.uidLen < b.uidLen;
     return memcmp(a.uid, b.uid, a.uidLen) < 0;
 }
-uint8_t currentTimeSource = TSRC_RTC;
+// Written from both networkTaskCode (link-down fallback) and the dedicated
+// ntpTaskCode (successful sync) - volatile ensures neither task nor the
+// compiler caches a stale value across that boundary.
+volatile uint8_t currentTimeSource = TSRC_RTC;
 unsigned long lastNtpSync = 0;
+
+// All RTC (I2C/Wire) access goes through these two wrappers rather than
+// calling rtc.now()/rtc.adjust() directly - see rtcMutex's declaration
+// above. Defined here, immediately after rtc/rtcMutex, and before every
+// function in this file that touches the RTC - this is a plain .cpp under
+// PlatformIO, not a .ino sketch, so there's no automatic forward-declaration
+// generation; a function has to be visible above its first use or the
+// compiler can't see it. (That's exactly what broke last time - these were
+// defined too far down the file.)
+// 50ms timeout is generous relative to how fast an actual I2C register
+// read/write completes (microseconds); if it's ever genuinely exceeded,
+// proceed unprotected rather than returning a bogus DateTime, and say so -
+// true contention this brief should be unreachable in practice.
+DateTime rtcNowSafe() {
+    DateTime result;
+    if (xSemaphoreTake(rtcMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        result = rtc.now();
+        xSemaphoreGive(rtcMutex);
+    } else {
+        Serial.println("WARNING: rtcMutex contended, reading RTC unprotected.");
+        result = rtc.now();
+    }
+    return result;
+}
+
+void rtcAdjustSafe(const DateTime& dt) {
+    if (xSemaphoreTake(rtcMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        rtc.adjust(dt);
+        xSemaphoreGive(rtcMutex);
+    } else {
+        Serial.println("WARNING: rtcMutex contended, adjusting RTC unprotected.");
+        rtc.adjust(dt);
+    }
+}
 
 // Hardware & Debounce State
 bool isRelayActive = false, isSuccessBeepActive = false, isDenySequenceActive = false;
@@ -732,7 +775,7 @@ void mqttCallback(String& topic, String& payload) {
             // (grantAccess() then logAccess()) inverted that for exactly this
             // one path.
             static const uint8_t remoteUid[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-            bool logged = logAccess(rtc.now(), remoteUid, 7, DIR_IN, RESULT_MANUAL);
+            bool logged = logAccess(rtcNowSafe(), remoteUid, 7, DIR_IN, RESULT_MANUAL);
 
             // This is a deliberate operator action, not an unauthenticated
             // scan - still open the door even if the audit write failed
@@ -947,7 +990,7 @@ void handleExitButton() {
             stableExitButtonState = reading;
             if (stableExitButtonState == LOW && !isRelayActive) {
                 static const uint8_t zeroUid[7] = {0};
-                if (logAccess(rtc.now(), zeroUid, 7, DIR_OUT, RESULT_MANUAL)) {
+                if (logAccess(rtcNowSafe(), zeroUid, 7, DIR_OUT, RESULT_MANUAL)) {
                     grantAccess();
                     Serial.println("EXIT BUTTON -> GRANTED");
                 } else {
@@ -985,9 +1028,9 @@ void handleRFID() {
     Serial.print("RFID UID: ");
     Serial.println(uidHex);
 
-    uint8_t resultCode = evaluateAccess(uidBytes, uidLen, rtc.now());
+    uint8_t resultCode = evaluateAccess(uidBytes, uidLen, rtcNowSafe());
 
-    if (logAccess(rtc.now(), uidBytes, uidLen, DIR_IN, resultCode)) {
+    if (logAccess(rtcNowSafe(), uidBytes, uidLen, DIR_IN, resultCode)) {
         if (resultCode == RESULT_GRANTED) {
             grantAccess();
         } else {
@@ -1014,7 +1057,7 @@ void initRTC() {
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     if (!rtc.begin()) { Serial.println("ERROR: PCF8563 missing."); currentTimeSource = TSRC_INVALID; return; }
     if (rtc.lostPower()) {
-        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+        rtcAdjustSafe(DateTime(F(__DATE__), F(__TIME__)));
         currentTimeSource = TSRC_INVALID;
     } else {
         currentTimeSource = TSRC_RTC;
@@ -1138,13 +1181,57 @@ void initMQTT() {
 }
 
 // ============================================================
+// 10b. NTP TASK (Core 0, independent of NETWORK TASK)
+// ============================================================
+// timeClient.update() has its own internal blocking behavior: when it
+// decides to actually attempt a sync, it does a DNS lookup for
+// "pool.ntp.org" and then polls for the UDP response via the library's own
+// delay(10) loop, waiting up to ~1s - and if DNS resolution itself is slow
+// or failing (plausible on a LAN without real internet access), that stacks
+// on top, easily reaching several seconds. That used to run inline inside
+// networkTaskCode()'s loop, which ALSO handles mqtt.loop(), ACK processing,
+// and command handling ("open") - so every time it fired, it froze all of
+// those for however long DNS+UDP took. Isolating it here means the retry
+// cadence below can be as aggressive as it wants without ever being able to
+// delay a door-open command or MQTT keepalive - unlike before, where a
+// tighter retry interval would have made a bad network moment worse, not
+// better, since every attempt was a shared-task stall.
+//
+// Deliberately NOT registered with the task watchdog - an occasional
+// multi-second block from a failed DNS lookup is now fully isolated here
+// and harmless on its own; it no longer has anything else to starve.
+void ntpTaskCode(void* parameter) {
+    timeClient.begin();
+
+    for (;;) {
+        if (Ethernet.linkStatus() == LinkON) {
+            timeClient.update(); // blocking (DNS + UDP wait), isolated to this task only
+
+            if (timeClient.isTimeSet()) {
+                rtcAdjustSafe(DateTime(timeClient.getEpochTime()));
+                currentTimeSource = TSRC_NTP;
+                lastNtpSync = millis();
+            }
+        }
+
+        // Dynamic interval: retry every 15s until the device has EVER synced
+        // successfully (isTimeSet() is a sticky flag in this library - once
+        // true, it stays true even if a later attempt fails), then back off
+        // to the full hourly interval. Safe to retry this fast now, since a
+        // slow/failing DNS lookup here can no longer touch networkTaskCode
+        // at all.
+        unsigned long waitMs = timeClient.isTimeSet() ? NTP_SYNC_INTERVAL_MS : 15000UL;
+        vTaskDelay(pdMS_TO_TICKS(waitMs));
+    }
+}
+
+// ============================================================
 // 11. NETWORK TASK (Core 0)
 // ============================================================
 void networkTaskCode(void* parameter) {
     esp_task_wdt_add(NULL); // Subscribe this task to the watchdog
 
     initEthernet();
-    timeClient.begin();
     initMQTT();
 
     unsigned long lastHeartbeat = millis();
@@ -1172,19 +1259,6 @@ void networkTaskCode(void* parameter) {
         Ethernet.maintain();
 
         if (Ethernet.linkStatus() == LinkON) {
-            // Manually enforce the NTP interval to prevent DNS blocking loops
-            static unsigned long lastNtpAttempt = 0;
-            if (lastNtpAttempt == 0 || now - lastNtpAttempt >= NTP_SYNC_INTERVAL_MS) {
-                lastNtpAttempt = now; // Update this immediately, regardless of success
-                timeClient.update();
-                
-                if (timeClient.isTimeSet()) {
-                    rtc.adjust(DateTime(timeClient.getEpochTime()));
-                    currentTimeSource = TSRC_NTP;
-                    lastNtpSync = now;
-                }
-            }
-
             if (!mqtt.connected()) {
                 if (now - lastReconnectAttempt >= backoff) {
                     if (mqtt.connect(DEVICE_ID)) {
@@ -1285,6 +1359,7 @@ void setup() {
 
     // Initialize the ACL Mutex
     aclMutex = xSemaphoreCreateMutex();
+    rtcMutex = xSemaphoreCreateMutex();
 
     loadAclToRAM();
     initRTC();
@@ -1292,6 +1367,10 @@ void setup() {
     rebuildQueueState();
 
     xTaskCreatePinnedToCore(networkTaskCode, "NetworkTask", 12000, nullptr, 1, &NetworkTask, 0);
+    // Separate, low-priority task so NTP's occasional multi-second blocking
+    // (DNS lookup + UDP wait) can never delay networkTaskCode's MQTT/command
+    // handling - see the comment above ntpTaskCode() for the full reasoning.
+    xTaskCreatePinnedToCore(ntpTaskCode, "NtpTask", 4096, nullptr, 1, &NtpTask, 0);
     Serial.println("Setup complete.");
 }
 
