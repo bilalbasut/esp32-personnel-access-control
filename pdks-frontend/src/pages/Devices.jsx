@@ -5,7 +5,7 @@ import { useActionStatus } from '../hooks/useActionStatus';
 import Alert from '../components/Alert';
 import { formatDateTime, formatBytes, isDeviceOnline } from '../utils/format';
 
-// One row's worth of per-device controls: open/sync/reboot buttons plus an
+// One row's worth of per-device controls: open/sync/reboot/settime buttons plus an
 // inline "push this firmware version" selector. Kept as its own component
 // so each row manages its own "which version is selected" state
 // independently.
@@ -33,6 +33,9 @@ function DeviceRow({ device, firmwareVersions, onCommand, onOta, now }) {
           </button>
           <button className="btn btn-outline-secondary" onClick={() => onCommand(device.id, 'sync')}>
             Sync ACL
+          </button>
+          <button className="btn btn-outline-info" onClick={() => onCommand(device.id, 'settime')}>
+            Set Time
           </button>
           <button
             className="btn btn-outline-danger"
@@ -139,7 +142,7 @@ function Devices() {
                   firmwareVersions={firmware}
                   onCommand={handleCommand}
                   onOta={handleOta}
-                  now={now} // Pass the deterministic time down as a prop
+                  now={now}
                 />
               ))}
             </tbody>

@@ -561,23 +561,28 @@ app.delete('/api/cards/:uid', async (req, res) => {
 // POST: Send remote command to ESP32
 app.post('/api/devices/:id/command', (req, res) => {
     const { id } = req.params;
-    const { cmd } = req.body; 
+    const { cmd, ts } = req.body; 
 
-    // "ota" is handled by POST /api/devices/:id/ota instead - it needs a
-    // version/url/md5 payload, not just a bare command word like these do.
     const validCommands = ['open', 'sync', 'reboot', 'settime'];
     if (!validCommands.includes(cmd)) {
         return res.status(400).json({ error: 'Invalid command.' });
     }
 
     const cmdTopic = `pdks/merkez/dev/${id}/cmd`;
+
+    // Package 'settime' as structured JSON containing the UTC epoch
+    let payload = cmd;
+    if (cmd === 'settime') {
+        const epoch = Number.isInteger(ts) ? ts : Math.floor(Date.now() / 1000);
+        payload = JSON.stringify({ cmd: 'settime', ts: epoch });
+    }
     
-    client.publish(cmdTopic, cmd, { qos: 1 }, (err) => {
+    client.publish(cmdTopic, payload, { qos: 1 }, (err) => {
         if (err) {
             console.error(`Failed to send ${cmd} to ${id}:`, err);
             return res.status(500).json({ error: 'Failed to send command.' });
         }
-        res.json({ message: `Command '${cmd}' queued for device ${id}.` });
+        res.json({ message: `Command '${cmd}' queued for device ${id}.`, payload });
     });
 });
 
