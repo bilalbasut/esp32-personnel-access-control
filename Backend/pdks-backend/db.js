@@ -92,6 +92,8 @@ const initDB = async () => {
         -- / ota_failed) so the panel can show update progress per device.
         ALTER TABLE devices ADD COLUMN IF NOT EXISTS ota_status VARCHAR(50);
         ALTER TABLE devices ADD COLUMN IF NOT EXISTS ota_updated_at BIGINT;
+
+        CREATE SEQUENCE IF NOT EXISTS acl_version_seq START 1;
     `;
 
     try {

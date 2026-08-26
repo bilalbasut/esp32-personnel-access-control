@@ -41,6 +41,13 @@ client.on('message', async (topic, message) => {
         }
 
         const now = Math.floor(Date.now() / 1000);
+        let tsrcInt = mapTsrc[data.tsrc] ?? 2;
+
+        // If event timestamp is >10 mins in the future or before year 2025, force invalid flag
+        if (data.ts > (now + 600) || data.ts < 1735689600) {
+            console.warn(`[TIMESTAMP ANOMALY] Device ${deviceId} sent suspect ts: ${data.ts}. Marking invalid.`);
+            tsrcInt = 2; // TSRC_INVALID
+        }
 
         // Opportunistic presence/firmware tracking - "fw" only ever appears on
         // event payloads, never on heartbeats, so this is the only place it can

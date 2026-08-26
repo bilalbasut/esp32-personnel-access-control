@@ -184,17 +184,51 @@ String pendingAclPayload;
 // ============================================================
 // 4. HELPERS (CRC, UID, Formatting, Thread-Safe RTC)
 // ============================================================
+
+// Static state for dead reckoning
+static uint32_t lastValidEpoch = 1735689600UL; // Base fallback: 2025-01-01
+static unsigned long lastValidMillis = 0;
+
 DateTime rtcNowSafe() {
-    DateTime result;
+    unsigned long nowMs = millis();
+    DateTime raw;
+    bool readSuccess = false;
+
     if (xSemaphoreTake(rtcMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        result = rtc.now();
-        cachedRtcTime = result;
+        raw = rtc.now();
         xSemaphoreGive(rtcMutex);
-    } else {
-        Serial.println("WARNING: rtcMutex contended, returning cached timestamp.");
-        result = cachedRtcTime;
+        readSuccess = true;
     }
-    return result;
+
+    uint32_t rawEpoch = raw.unixtime();
+
+    // 1. Hard Range Check (Must be between 2025 and 2035)
+    bool inRange = (rawEpoch >= 1735689600UL && rawEpoch <= 2051222400UL);
+
+    // 2. Glitch & Spike Filter: RTC cannot advance faster than real elapsed millis()
+    bool physicallyPlausible = true;
+    if (lastValidMillis > 0 && inRange) {
+        unsigned long elapsedSec = (nowMs - lastValidMillis) / 1000;
+        // If RTC jumped forward by more than 5 minutes above expected elapsed time without NTP
+        if (rawEpoch > (lastValidEpoch + elapsedSec + 300)) {
+            physicallyPlausible = false;
+        }
+    }
+
+    if (readSuccess && inRange && physicallyPlausible) {
+        lastValidEpoch = rawEpoch;
+        lastValidMillis = nowMs;
+        return raw;
+    }
+
+    // --- RECOVERY VIA DEAD RECKONING ---
+    // If RTC returned 2041, 1970, or corrupted I2C noise, calculate time using millis()
+    Serial.printf("WARNING: RTC corruption detected (%lu). Using dead reckoning.\n", rawEpoch);
+    currentTimeSource = TSRC_INVALID; // Mark audit flag per FR-10
+
+    if (lastValidMillis == 0) lastValidMillis = nowMs;
+    uint32_t estimatedEpoch = lastValidEpoch + ((nowMs - lastValidMillis) / 1000);
+    return DateTime(estimatedEpoch);
 }
 
 void rtcAdjustSafe(const DateTime& dt) {

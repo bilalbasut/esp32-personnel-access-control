@@ -97,54 +97,36 @@ let lastPublishedAclVersion = Math.floor(Date.now() / 1000);
 
 const publishAclUpdate = async () => {
     try {
-        // Pull everything the firmware needs to make a decision, not just uid.
         const result = await pool.query(
             'SELECT uid, floors, valid_to, win_start_m, win_end_m FROM cards WHERE aktif = 1'
         );
+
+        // Fetch strictly incrementing version number (1, 2, 3, 4...)
+        const seqResult = await pool.query("SELECT nextval('acl_version_seq') AS ver");
+        const newVersion = parseInt(seqResult.rows[0].ver, 10);
 
         const activeCards = result.rows.map((row) => {
             const card = {
                 uid: row.uid,
                 floors: parseFloors(row.floors),
-                // Firmware falls back to "no expiry" if this is missing; sending
-                // it explicitly avoids relying on that fallback.
                 valid_to: row.valid_to !== null ? Number(row.valid_to) : 4294967295,
             };
 
             const startM = Number.isFinite(row.win_start_m) ? row.win_start_m : 0;
             const endM = Number.isFinite(row.win_end_m) ? row.win_end_m : 1440;
-            const isFullDay = startM === 0 && endM === 1440;
-
-            // "HH:MM" can only represent up to 23:59 (minute 1439), so a full-day
-            // window can never round-trip through formatWindow() without loss -
-            // 1440 gets forced to 1439, and the firmware then denies access during
-            // the last minute of every day (its check is `>= win_end_m`). Omitting
-            // "win" entirely lets the firmware's own missing-field fallback
-            // (0-1440, genuinely unrestricted) handle it correctly instead.
-            if (!isFullDay) {
+            if (!(startM === 0 && endM === 1440)) {
                 card.win = formatWindow(startM, endM);
             }
-
             return card;
         });
-
-        const newVersion = Math.max(Math.floor(Date.now() / 1000), lastPublishedAclVersion + 1);
-        lastPublishedAclVersion = newVersion;
 
         const aclPayload = JSON.stringify({
             ver: newVersion,
             cards: activeCards,
         });
 
-        client.publish(
-            'pdks/merkez/cfg/acl',
-            aclPayload,
-            { qos: 1, retain: true },
-            (err) => {
-                if (err) console.error('Failed to publish ACL to broker:', err);
-                else console.log(`[ACL UPDATE] Version ${newVersion} published successfully.`);
-            }
-        );
+        client.publish('pdks/merkez/cfg/acl', aclPayload, { qos: 1, retain: true });
+        console.log(`[ACL UPDATE] Incremental Version ${newVersion} published.`);
     } catch (err) {
         console.error('Error generating ACL:', err);
     }
