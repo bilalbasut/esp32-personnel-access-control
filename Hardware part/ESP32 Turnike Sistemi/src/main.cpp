@@ -23,7 +23,7 @@
 // ============================================================
 // 1. CONFIGURATION
 // ============================================================
-#define FW_VERSION "1.5.0"
+#define FW_VERSION "1.6.0"
 #define DEVICE_ID "GATE-K3-01"
 #define FLOOR_NUMBER 3
 
@@ -62,16 +62,9 @@
 #define ACK_TIMEOUT_MS          2000UL
 #define PUBLISH_RATE_LIMIT_MS     50UL // max 20 msgs/sec
 
-// OTA. This is deliberately synchronous: the whole
-// download+flash runs inside mqttCallback() on the network task (core 0),
-// blocking MQTT keepalive/ACK processing for its duration. RFID/relay
-// handling (handleRFID/handleExitButton, core 1) is completely unaffected -
-// the door keeps working normally during an update, which is the guarantee
-// that actually matters. A lapsed keepalive just triggers the existing
-// reconnect-with-backoff afterward, already self-healing.
 #define OTA_CHUNK_SIZE           512
-#define OTA_STALL_TIMEOUT_MS   10000UL // no bytes received for this long -> abort
-#define OTA_TOTAL_TIMEOUT_MS   60000UL // whole download taking longer than this -> abort
+#define OTA_STALL_TIMEOUT_MS   10000UL
+#define OTA_TOTAL_TIMEOUT_MS   60000UL
 
 // Persistent queue
 #define EVENT_FILE "/events.bin"
@@ -101,12 +94,12 @@ struct AccessRecord {
 
 #pragma pack(push, 1)
 struct AclRecord {
-    uint8_t  uid[7];       // Up to 7-byte UID
-    uint8_t  uidLen;       // Length of the UID (usually 4 or 7)
-    uint32_t floor_mask;   // Bitmask for floors (e.g., bit 3 = floor 3)
-    uint32_t valid_to;     // Unix timestamp for expiration (UTC)
-    uint16_t win_start_m;  // Active window start (minutes from midnight. e.g. 07:00 = 420)
-    uint16_t win_end_m;    // Active window end (minutes from midnight. e.g. 19:00 = 1140)
+    uint8_t  uid[7];
+    uint8_t  uidLen;
+    uint32_t floor_mask;
+    uint32_t valid_to;
+    uint16_t win_start_m;
+    uint16_t win_end_m;
 };
 #pragma pack(pop)
 
@@ -117,7 +110,7 @@ enum ResultCode : uint8_t { RESULT_GRANTED = 0, RESULT_UNKNOWN = 1, RESULT_EXPIR
 enum TimeSource : uint8_t { TSRC_NTP = 0, TSRC_RTC = 1, TSRC_INVALID = 2 };
 
 // ============================================================
-// 3. GLOBAL OBJECTS
+// 3. GLOBAL OBJECTS & THREAD SYNCHRONIZATION
 // ============================================================
 Preferences preferences;
 RTC_PCF8563 rtc;
@@ -149,34 +142,53 @@ const char* TOPIC_EVENT_ACK = "pdks/merkez/dev/GATE-K3-01/event/ack";
 const char* TOPIC_STATUS    = "pdks/merkez/dev/GATE-K3-01/status";
 const char* TOPIC_HEARTBEAT = "pdks/merkez/dev/GATE-K3-01/hb";
 const char* TOPIC_ACL       = "pdks/merkez/cfg/acl";
-const char* TOPIC_CMD     = "pdks/merkez/dev/GATE-K3-01/cmd";
-const char* TOPIC_CMD_RES = "pdks/merkez/dev/GATE-K3-01/cmd/res";
+const char* TOPIC_CMD       = "pdks/merkez/dev/GATE-K3-01/cmd";
+const char* TOPIC_CMD_RES   = "pdks/merkez/dev/GATE-K3-01/cmd/res";
 
 // RAM State
 uint32_t readPointer = 0, writePointer = 0, globalSequence = 0;
 uint32_t currentAclVersion = 0, queueCount = 0;
-uint32_t queueOverflowCount = 0; // number of unacked records evicted to make room
-// Set by the remote "reboot" command; consumed non-blockingly in the network
-// task loop. The rest of this firmware deliberately never calls delay() (see
-// project spec section 2.1/9 - it breaks MQTT keepalive and RFID responsiveness),
-// so a reboot request can't just block for 500ms waiting for "rebooting" to
-// flush onto the wire either.
+uint32_t queueOverflowCount = 0;
 volatile bool rebootPending = false;
 unsigned long rebootRequestedAt = 0;
 uint32_t eventsSinceCheckpoint = 0, acksSinceCheckpoint = 0;
 std::vector<AclRecord> aclList;
 
-// FreeRTOS Synchronization
+// FreeRTOS Mutexes
 portMUX_TYPE queueMux = portMUX_INITIALIZER_UNLOCKED;
 SemaphoreHandle_t aclMutex = NULL;
+SemaphoreHandle_t rtcMutex = NULL;
 
-// Helper comparator for sorting and binary search
+volatile uint8_t currentTimeSource = TSRC_RTC;
+unsigned long lastNtpSync = 0;
+
+// Thread-safe I2C/RTC wrappers
+DateTime rtcNowSafe() {
+    DateTime result;
+    if (xSemaphoreTake(rtcMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        result = rtc.now();
+        xSemaphoreGive(rtcMutex);
+    } else {
+        Serial.println("WARNING: rtcMutex contended, reading RTC unprotected.");
+        result = rtc.now();
+    }
+    return result;
+}
+
+void rtcAdjustSafe(const DateTime& dt) {
+    if (xSemaphoreTake(rtcMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        rtc.adjust(dt);
+        xSemaphoreGive(rtcMutex);
+    } else {
+        Serial.println("WARNING: rtcMutex contended, adjusting RTC unprotected.");
+        rtc.adjust(dt);
+    }
+}
+
 bool compareAclRecords(const AclRecord& a, const AclRecord& b) {
     if (a.uidLen != b.uidLen) return a.uidLen < b.uidLen;
     return memcmp(a.uid, b.uid, a.uidLen) < 0;
 }
-uint8_t currentTimeSource = TSRC_RTC;
-unsigned long lastNtpSync = 0;
 
 // Hardware & Debounce State
 bool isRelayActive = false, isSuccessBeepActive = false, isDenySequenceActive = false;
@@ -216,7 +228,6 @@ bool isRecordValid(const AccessRecord& record) {
     return calculateRecordCRC(record) == record.crc16;
 }
 
-// Allocation-free hex helpers: bytes <-> hex text, no String involved anywhere.
 uint8_t hexNibble(char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
@@ -224,7 +235,6 @@ uint8_t hexNibble(char c) {
     return 0;
 }
 
-// Parses up to maxLen bytes of hex text (e.g. "04A2B3C1") into byteArray.
 void hexToBytes(const char* hex, size_t hexLen, uint8_t* byteArray, uint8_t maxLen) {
     memset(byteArray, 0, maxLen);
     for (size_t i = 0; i + 1 < hexLen && (i / 2) < maxLen; i += 2) {
@@ -232,7 +242,6 @@ void hexToBytes(const char* hex, size_t hexLen, uint8_t* byteArray, uint8_t maxL
     }
 }
 
-// Writes uppercase hex text for `len` bytes into out (out must be at least 2*len+1 bytes).
 void bytesToHex(const uint8_t* bytes, uint8_t len, char* out, size_t outSize) {
     static const char hexChars[] = "0123456789ABCDEF";
     size_t pos = 0;
@@ -318,7 +327,6 @@ void handleHardwareTimers() {
 // 6. ACL & FILE SYSTEM
 // ============================================================
 void loadAclToRAM() {
-    // Switch to binary file
     File file = LittleFS.open("/database.bin", FILE_READ);
     if (!file) { 
         Serial.println("ERROR: database.bin unavailable. No ACL loaded."); 
@@ -331,14 +339,8 @@ void loadAclToRAM() {
     }
     size_t recordCount = fileSize / sizeof(AclRecord);
 
-    // Build the new list off to the side, without touching the shared aclList or
-    // holding aclMutex at all. File I/O + sort can take a noticeable amount of time
-    // once the card list grows, and evaluateAccess() (RFID hot path, core 1) only
-    // waits 100ms for the mutex before treating a legitimate card as "unknown".
-    // Holding the mutex for the whole reload risked spuriously denying a real
-    // cardholder mid-reload.
     std::vector<AclRecord> newList;
-    newList.reserve(recordCount); // Pre-allocate memory to prevent fragmentation
+    newList.reserve(recordCount);
 
     AclRecord record;
     while (file.read(reinterpret_cast<uint8_t*>(&record), sizeof(AclRecord)) == sizeof(AclRecord)) {
@@ -348,9 +350,6 @@ void loadAclToRAM() {
 
     std::sort(newList.begin(), newList.end(), compareAclRecords);
 
-    // The actual swap-in is just an exchange of a few pointers/sizes on the vector
-    // (O(1)), so the critical section is now genuinely tiny - evaluateAccess() will
-    // never see a multi-millisecond stall waiting on this mutex.
     if (xSemaphoreTake(aclMutex, portMAX_DELAY) == pdTRUE) {
         aclList.swap(newList);
         xSemaphoreGive(aclMutex);
@@ -358,7 +357,6 @@ void loadAclToRAM() {
         Serial.println("ERROR: Could not acquire ACL mutex to swap in new list.");
         return;
     }
-    // newList now holds the old data (or is empty on first load) and is freed here.
 
     Serial.printf("Binary ACL loaded: %d records\n", aclList.size());
 }
@@ -370,7 +368,6 @@ uint8_t evaluateAccess(const uint8_t* scannedUid, uint8_t uidLen, const DateTime
 
     uint8_t result = RESULT_UNKNOWN;
 
-    // Take mutex with a 100ms timeout so we don't block the hardware loop forever
     if (xSemaphoreTake(aclMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         auto it = std::lower_bound(aclList.begin(), aclList.end(), target, compareAclRecords);
         
@@ -414,12 +411,6 @@ bool queueIsEmpty() {
     return empty;
 }
 
-// When the queue is full, drop the single oldest unacknowledged record to make room
-// for the new one, instead of refusing the write. Doors must keep working even during
-// an extended outage; sacrificing the oldest unsent record is the documented trade-off
-// readPointer is normally only mutated by the network task
-// (on ACK) - this is the one place it's also mutated from the RFID/exit-button
-// path, so it must go through queueMux like every other cross-core queue update.
 bool evictOldestIfFull() {
     bool wasFull = false;
     portENTER_CRITICAL(&queueMux);
@@ -473,7 +464,7 @@ void rebuildQueueState() {
             if (record.seq > newestSeq) { newestSeq = record.seq; newestIndex = static_cast<int>(i); }
         }
         i++;
-        if ((i & 0x3FF) == 0) esp_task_wdt_reset(); // her 1024 kayıtta bir watchdog'u besle
+        if ((i & 0x3FF) == 0) esp_task_wdt_reset();
     }
     file.close();
 
@@ -525,10 +516,6 @@ bool logAccess(const DateTime& now, const uint8_t* uidBytes, uint8_t uidLen, uin
     if (!writeEventRecord(record, writePointer)) {
         globalSequence--;
         Serial.println("ERROR: Event write failed.");
-        // Note: if overwroteOldest is true here, readPointer has already advanced past
-        // the evicted slot even though the replacement write failed - a rare double-
-        // fault (queue full + flash I/O error at the same time) that trades a single
-        // stale record for keeping the door responsive. Documented, not auto-recovered.
         return false;
     }
 
@@ -545,12 +532,6 @@ bool logAccess(const DateTime& now, const uint8_t* uidBytes, uint8_t uidLen, uin
 // ============================================================
 // 8a. OTA FIRMWARE UPDATE
 // ============================================================
-// Splits "http://host[:port]/path" into its parts. TLS isn't supported here,
-// matching MQTT's own current lack of TLS (FR-17 also still pending) - both
-// are fine for a private LAN, neither is fine to expose beyond one.
-// Uses String since this runs once per OTA attempt (a rare, deliberately
-// triggered admin action), not per-scan - the heap-fragmentation risk that
-// ruled String out of the RFID/ACL hot paths doesn't apply here.
 bool parseHttpUrl(const String& url, String& host, uint16_t& port, String& path) {
     if (!url.startsWith("http://")) return false;
     String rest = url.substring(7);
@@ -569,25 +550,6 @@ bool parseHttpUrl(const String& url, String& host, uint16_t& port, String& path)
     return host.length() > 0;
 }
 
-// Downloads the firmware at `url` and flashes it via the Update library.
-// expectedMd5 must be exactly 32 hex chars; expectedSize is a sanity check
-// against the server's own record of the file, separate from whatever
-// Content-Length the HTTP response itself reports.
-//
-// Safety model: Update.setMD5() is checked automatically inside Update.end(),
-// and the new partition is only marked bootable if that check (and the write
-// itself) fully succeeds. A corrupted/truncated/wrong-file download leaves
-// the currently-running firmware completely untouched - there is no partial
-// or "maybe corrupt" state the device can end up booting into from this
-// function failing partway through.
-//
-// Known limitation: this verifies the bytes weren't corrupted in transit,
-// not who produced them - there's no code signing here. It also doesn't
-// implement post-boot crash rollback (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
-// is a platformio.ini/sdkconfig-level setting, not something this function
-// can control) - if a bad-but-intact binary boots and then crashes, ESP-IDF's
-// default behavior applies, which depends on partition/rollback config this
-// firmware doesn't assume.
 bool performOTA(const String& url, const String& expectedMd5, uint32_t expectedSize) {
     String host, path;
     uint16_t port;
@@ -609,7 +571,6 @@ bool performOTA(const String& url, const String& expectedMd5, uint32_t expectedS
 
     otaClient.printf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path.c_str(), host.c_str());
 
-    // --- Read status line + headers ---
     unsigned long headerWaitStart = millis();
     String statusLine = otaClient.readStringUntil('\n');
     if (statusLine.indexOf(" 200 ") == -1) {
@@ -624,7 +585,7 @@ bool performOTA(const String& url, const String& expectedMd5, uint32_t expectedS
         if (line.startsWith("Content-Length:")) {
             contentLength = line.substring(16).toInt();
         }
-        if (line == "\r" || line.length() == 0) break; // blank line = end of headers
+        if (line == "\r" || line.length() == 0) break;
     }
 
     if (contentLength <= 0) {
@@ -633,10 +594,6 @@ bool performOTA(const String& url, const String& expectedMd5, uint32_t expectedS
         return false;
     }
     if (expectedSize > 0 && (uint32_t)contentLength != expectedSize) {
-        // Not necessarily fatal (the server's stored metadata could be
-        // stale), but worth surfacing rather than silently trusting either
-        // number - proceed using what the HTTP response itself reports,
-        // since that's what will actually be written.
         Serial.printf("OTA: WARNING - server said size=%u, Content-Length=%ld. Using Content-Length.\n",
                       expectedSize, contentLength);
     }
@@ -653,14 +610,13 @@ bool performOTA(const String& url, const String& expectedMd5, uint32_t expectedS
         return false;
     }
 
-    // --- Stream body straight into flash ---
     uint8_t buf[OTA_CHUNK_SIZE];
     uint32_t totalWritten = 0;
     unsigned long lastDataMs = millis();
     unsigned long downloadStart = millis();
 
     while (totalWritten < (uint32_t)contentLength) {
-        esp_task_wdt_reset(); // this loop can easily run longer than the 10s WDT timeout
+        esp_task_wdt_reset();
 
         if (millis() - downloadStart > OTA_TOTAL_TIMEOUT_MS) {
             Serial.println("OTA: overall timeout exceeded, aborting.");
@@ -697,8 +653,6 @@ bool performOTA(const String& url, const String& expectedMd5, uint32_t expectedS
     }
     otaClient.stop();
 
-    // Update.end(true) finalizes the write AND checks the MD5 set above -
-    // the new partition is only marked bootable if both pass.
     if (!Update.end(true)) {
         Serial.printf("OTA: finalize/verify failed: %s\n", Update.errorString());
         return false;
@@ -724,58 +678,25 @@ void mqttCallback(String& topic, String& payload) {
         Serial.println("Remote command received: " + payload);
         
         if (payload == "open") {
-            // Write before actuate, same as every card scan (handleRFID) and
-            // the exit button (handleExitButton) - the project's core rule is
-            // that a record must never wait in RAM while the relay has
-            // already fired, since a power loss in between would lose the
-            // event with no trace it ever happened. The previous order here
-            // (grantAccess() then logAccess()) inverted that for exactly this
-            // one path.
             static const uint8_t remoteUid[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-            bool logged = logAccess(rtc.now(), remoteUid, 7, DIR_IN, RESULT_MANUAL);
+            bool logged = logAccess(rtcNowSafe(), remoteUid, 7, DIR_IN, RESULT_MANUAL);
 
-            // This is a deliberate operator action, not an unauthenticated
-            // scan - still open the door even if the audit write failed
-            // (e.g. a rare double-fault with the queue), but say so clearly
-            // rather than silently reporting "open_ok" either way.
             grantAccess();
             mqtt.publish(TOPIC_CMD_RES, logged ? "open_ok" : "open_ok_unlogged", false, 1);
             if (!logged) Serial.println("WARNING: Remote open succeeded but the event was not logged.");
             
         } else if (payload == "reboot") {
             mqtt.publish(TOPIC_CMD_RES, "rebooting", false, 1);
-            // Actual restart happens non-blockingly in the network task loop,
-            // giving the MQTT client a chance to flush "rebooting" onto the
-            // wire first - see the note by rebootPending's declaration for
-            // why this can't just be a delay(500) here.
             rebootPending = true;
             rebootRequestedAt = millis();
             
         } else if (payload == "sync") {
-            // Zeroing currentAclVersion alone was a no-op while connected: it
-            // only takes effect on the *next* genuinely new ACL publish from
-            // the panel, or the *next* reconnect - neither of which is
-            // "on-demand" the way this command is supposed to be. Retained
-            // messages are only (re)delivered on a SUBSCRIBE packet, and this
-            // device was already subscribed, so nothing was actually
-            // triggered to be resent.
-            // Re-subscribing fixes that: per the MQTT spec, a SUBSCRIBE -
-            // even to a topic the client is already subscribed to - always
-            // redelivers that topic's current retained message. Combined with
-            // zeroing the version (so whatever comes back is guaranteed to be
-            // treated as newer, forcing a genuine re-parse even if the
-            // version number turns out unchanged), this recovers from a
-            // corrupted or stale local copy, not just "fetch it if newer".
             currentAclVersion = 0;
             preferences.putUInt("aclVer", 0);
             mqtt.subscribe(TOPIC_ACL, 1);
             mqtt.publish(TOPIC_CMD_RES, "sync_triggered", false, 1);
 
         } else if (payload.startsWith("{")) {
-            // OTA (and any future structured command) arrives as JSON rather
-            // than a bare word, since it needs more than one piece of data.
-            // The existing open/reboot/sync commands stay plain strings -
-            // this is additive, not a protocol-wide change.
             JsonDocument cmdDoc;
             if (deserializeJson(cmdDoc, payload)) {
                 Serial.println("Invalid command JSON.");
@@ -799,21 +720,16 @@ void mqttCallback(String& topic, String& payload) {
 
                 if (ok) {
                     mqtt.publish(TOPIC_CMD_RES, "ota_ok_rebooting", false, 1);
-                    // Reuses the same non-blocking reboot path as the "reboot"
-                    // command above, giving this ack a chance to flush first.
                     rebootPending = true;
                     rebootRequestedAt = millis();
                 } else {
                     mqtt.publish(TOPIC_CMD_RES, "ota_failed", false, 1);
-                    // Current firmware is untouched either way - see the
-                    // safety-model note above performOTA().
                 }
             }
         }
     }
 }
 
-// Returns boolean indicating if a message is currently waiting for ack
 bool processPendingAck(bool currentlyWaiting) {
     if (!currentlyWaiting || !ackReceived) return currentlyWaiting;
     ackReceived = false;
@@ -830,7 +746,7 @@ bool processPendingAck(bool currentlyWaiting) {
         acksSinceCheckpoint++;
         Serial.printf("ACK accepted seq=%d\n", pendingAckSeq);
         saveCheckpoint(false);
-        return false; // No longer waiting for this ACK
+        return false;
     }
     return currentlyWaiting;
 }
@@ -842,7 +758,7 @@ bool buildEventPayload(const AccessRecord& record, char* buffer, size_t bufferSi
     JsonDocument doc;
     doc["seq"] = record.seq;
     doc["dev"] = DEVICE_ID;
-    doc["uid"] = uidHex; // ArduinoJson copies this into its own pool immediately
+    doc["uid"] = uidHex;
     doc["ts"] = record.ts;
     doc["tsrc"] = timeSourceToText(record.tsrc);
     doc["floor"] = record.floor;
@@ -888,24 +804,20 @@ void processACLUpdate() {
         record.uidLen = min(uidCstrLen / 2, (size_t)7);
         hexToBytes(uidCstr, uidCstrLen, record.uid, 7);
         
-        // Parse floors into a bitmask (e.g., [1, 3] sets bits 1 and 3)
         JsonArray floors = card["floors"].as<JsonArray>();
         for (JsonVariant f : floors) {
             uint8_t floorNum = f.as<uint8_t>();
             if (floorNum < 32) record.floor_mask |= (1UL << floorNum);
         }
         
-        // Default to max uint32 if valid_to is missing
         record.valid_to = card["valid_to"] | 0xFFFFFFFF; 
         
-        // Parse time window "07:00-19:00" into minutes from midnight
         const char* win = card["win"] | "";
         int startH, startM, endH, endM;
         if (strlen(win) == 11 && sscanf(win, "%d:%d-%d:%d", &startH, &startM, &endH, &endM) == 4) {
             record.win_start_m = (startH * 60) + startM;
             record.win_end_m = (endH * 60) + endM;
         } else {
-            // Default to 24 hours if missing or invalid
             record.win_start_m = 0;
             record.win_end_m = 1440;
         }
@@ -915,19 +827,16 @@ void processACLUpdate() {
     dbFile.flush(); 
     dbFile.close();
 
-    // Atomic file swap mechanism
     if (LittleFS.exists("/database.bin")) {
         LittleFS.rename("/database.bin", "/database.bak");
     }
     
     if (!LittleFS.rename("/database.tmp", "/database.bin")) { 
         Serial.println("ERROR: ACL rename failed."); 
-        // Rollback on failure
         if (LittleFS.exists("/database.bak")) LittleFS.rename("/database.bak", "/database.bin");
         return; 
     }
     
-    // Clean up backup on success
     if (LittleFS.exists("/database.bak")) LittleFS.remove("/database.bak");
 
     loadAclToRAM();
@@ -947,11 +856,10 @@ void handleExitButton() {
             stableExitButtonState = reading;
             if (stableExitButtonState == LOW && !isRelayActive) {
                 static const uint8_t zeroUid[7] = {0};
-                if (logAccess(rtc.now(), zeroUid, 7, DIR_OUT, RESULT_MANUAL)) {
+                if (logAccess(rtcNowSafe(), zeroUid, 7, DIR_OUT, RESULT_MANUAL)) {
                     grantAccess();
                     Serial.println("EXIT BUTTON -> GRANTED");
                 } else {
-                    // Provide physical feedback if logging fails
                     denyAccess();
                     Serial.println("SYSTEM ERROR: Exit button logging failed.");
                 }
@@ -985,16 +893,15 @@ void handleRFID() {
     Serial.print("RFID UID: ");
     Serial.println(uidHex);
 
-    uint8_t resultCode = evaluateAccess(uidBytes, uidLen, rtc.now());
+    uint8_t resultCode = evaluateAccess(uidBytes, uidLen, rtcNowSafe());
 
-    if (logAccess(rtc.now(), uidBytes, uidLen, DIR_IN, resultCode)) {
+    if (logAccess(rtcNowSafe(), uidBytes, uidLen, DIR_IN, resultCode)) {
         if (resultCode == RESULT_GRANTED) {
             grantAccess();
         } else {
             denyAccess();
         }
     } else {
-        // Provide physical feedback if the queue is full or FS fails
         denyAccess();
         Serial.println("SYSTEM ERROR: User denied due to logging failure.");
     }
@@ -1014,7 +921,7 @@ void initRTC() {
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     if (!rtc.begin()) { Serial.println("ERROR: PCF8563 missing."); currentTimeSource = TSRC_INVALID; return; }
     if (rtc.lostPower()) {
-        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+        rtcAdjustSafe(DateTime(F(__DATE__), F(__TIME__)));
         currentTimeSource = TSRC_INVALID;
     } else {
         currentTimeSource = TSRC_RTC;
@@ -1024,7 +931,6 @@ void initRTC() {
 void initFileSystem() {
     if (!LittleFS.begin(true)) { Serial.println("ERROR: LittleFS mount failed."); return; }
     
-    // Touch the binary file if it doesn't exist
     if (!LittleFS.exists("/database.bin")) {
         File file = LittleFS.open("/database.bin", FILE_WRITE);
         if (file) file.close(); 
@@ -1039,95 +945,22 @@ void initEthernet() {
     Serial.println("=== W5500 INIT ===");
 
     pinMode(W5500_RST_PIN, OUTPUT);
-
     digitalWrite(W5500_RST_PIN, LOW);
     delay(100);
-
     digitalWrite(W5500_RST_PIN, HIGH);
     delay(500);
 
     Serial.println("Starting VSPI...");
-
-    SPI.begin(
-        W5500_SCK_PIN,
-        W5500_MISO_PIN,
-        W5500_MOSI_PIN,
-        W5500_CS_PIN
-    );
-
-    pinMode(
-        W5500_CS_PIN,
-        OUTPUT
-    );
-
-    digitalWrite(
-        W5500_CS_PIN,
-        HIGH
-    );
-
-    Ethernet.init(
-        W5500_CS_PIN
-    );
+    SPI.begin(W5500_SCK_PIN, W5500_MISO_PIN, W5500_MOSI_PIN, W5500_CS_PIN);
+    pinMode(W5500_CS_PIN, OUTPUT);
+    digitalWrite(W5500_CS_PIN, HIGH);
+    Ethernet.init(W5500_CS_PIN);
 
     Serial.println("Calling Ethernet.begin()...");
-
-    Ethernet.begin(
-        mac,
-        deviceIP,
-        dnsIP,
-        gatewayIP,
-        subnetMask
-    );
-
-    EthernetHardwareStatus hw =
-        Ethernet.hardwareStatus();
-
-    Serial.print("Hardware status: ");
-
-    switch (hw) {
-
-        case EthernetW5500:
-            Serial.println("W5500 DETECTED");
-            break;
-
-        case EthernetW5100:
-            Serial.println("W5100 DETECTED");
-            break;
-
-        case EthernetW5200:
-            Serial.println("W5200 DETECTED");
-            break;
-
-        default:
-            Serial.println("NO ETHERNET HARDWARE");
-            break;
-    }
-
-    Serial.print("Link status: ");
-
-    switch (Ethernet.linkStatus()) {
-
-        case LinkON:
-            Serial.println("LINK ON");
-            break;
-
-        case LinkOFF:
-            Serial.println("LINK OFF");
-            break;
-
-        default:
-            Serial.println("LINK UNKNOWN");
-            break;
-    }
+    Ethernet.begin(mac, deviceIP, dnsIP, gatewayIP, subnetMask);
 
     Serial.print("IP: ");
     Serial.println(Ethernet.localIP());
-
-    Serial.print("Gateway: ");
-    Serial.println(Ethernet.gatewayIP());
-
-    Serial.print("Subnet: ");
-    Serial.println(Ethernet.subnetMask());
 }
 
 void initMQTT() {
@@ -1141,7 +974,7 @@ void initMQTT() {
 // 11. NETWORK TASK (Core 0)
 // ============================================================
 void networkTaskCode(void* parameter) {
-    esp_task_wdt_add(NULL); // Subscribe this task to the watchdog
+    esp_task_wdt_add(NULL);
 
     initEthernet();
     timeClient.begin();
@@ -1151,20 +984,14 @@ void networkTaskCode(void* parameter) {
     unsigned long lastReconnectAttempt = 0;
     unsigned long backoff = 1000;
     
-    // Store & Forward State Variables
     bool waitingForAck = false;
     unsigned long ackWaitStart = 0;
     unsigned long lastPublishTime = 0;
 
     for (;;) {
-        esp_task_wdt_reset(); // Feed the watchdog
+        esp_task_wdt_reset();
         unsigned long now = millis();
 
-        // Non-blocking counterpart to the removed delay(500) before ESP.restart():
-        // give the "rebooting" ack ~500ms to actually flush onto the wire via
-        // mqtt.loop() below on prior iterations, then restart. Checked every
-        // iteration of this loop (short period), so the actual delay past 500ms
-        // is negligible.
         if (rebootPending && (now - rebootRequestedAt >= 500)) {
             ESP.restart();
         }
@@ -1174,16 +1001,16 @@ void networkTaskCode(void* parameter) {
         if (Ethernet.linkStatus() == LinkON) {
             // Dynamic non-blocking NTP interval: 15s until valid, then hourly
             static unsigned long lastNtpAttempt = 0;
-            unsigned long ntpInterval = timeClient.isTimeSet() ? NTP_SYNC_INTERVAL_MS : 15000UL;
+            unsigned long ntpInterval = (currentTimeSource == TSRC_NTP) ? NTP_SYNC_INTERVAL_MS : 15000UL;
 
             if (lastNtpAttempt == 0 || now - lastNtpAttempt >= ntpInterval) {
                 lastNtpAttempt = now;
-                timeClient.update();
-
-                if (timeClient.isTimeSet()) {
+                
+                // forceUpdate() ensures our manual dynamic interval is respected
+                if (timeClient.forceUpdate()) {
                     unsigned long epoch = timeClient.getEpochTime();
                     
-                    // Sanity check: Epoch must be valid (between 2025-01-01 and 2035-01-01)
+                    // Sanity check: Epoch between 2025-01-01 and 2035-01-01
                     if (epoch >= 1735689600UL && epoch <= 2051222400UL) {
                         rtcAdjustSafe(DateTime(epoch));
                         currentTimeSource = TSRC_NTP;
@@ -1204,7 +1031,7 @@ void networkTaskCode(void* parameter) {
                         mqtt.subscribe(TOPIC_CMD, 1);
                     } else {
                         backoff = min(backoff * 2, 60000UL);
-                        backoff += random(0, 1000); // jitter, avoids synchronized reconnect storms across gate units
+                        backoff += random(0, 1000);
                     }
                     lastReconnectAttempt = now;
                 }
@@ -1228,14 +1055,14 @@ void networkTaskCode(void* parameter) {
 
                     char hbPayload[128];
                     serializeJson(hb, hbPayload, sizeof(hbPayload));
-                    mqtt.publish(TOPIC_HEARTBEAT, hbPayload, false, 0); // QoS 0 as required
+                    mqtt.publish(TOPIC_HEARTBEAT, hbPayload, false, 0);
                     lastHeartbeat = now;
                 }
 
-                // Store-and-forward Processing with Timeout & Rate Limiting
+                // Store-and-forward Processing
                 if (!queueIsEmpty()) {
                     if (waitingForAck) {
-                        if (now - ackWaitStart >= ACK_TIMEOUT_MS) waitingForAck = false; // Timeout reached, retry
+                        if (now - ackWaitStart >= ACK_TIMEOUT_MS) waitingForAck = false;
                     } else if (now - lastPublishTime >= PUBLISH_RATE_LIMIT_MS) {
                         if (publishQueueHead()) {
                             waitingForAck = true;
@@ -1246,7 +1073,6 @@ void networkTaskCode(void* parameter) {
                 }
             }
         } else {
-            // Revert to RTC tracking if network link is physically down
             currentTimeSource = TSRC_RTC;
         }
 
@@ -1254,6 +1080,7 @@ void networkTaskCode(void* parameter) {
         vTaskDelay(25 / portTICK_PERIOD_MS);
     }
 }
+
 // ============================================================
 // 12. SETUP & LOOP (Core 1)
 // ============================================================
@@ -1262,19 +1089,15 @@ void setup() {
     delay(1000);
 
     Serial.printf("Reset reason: %d\n", esp_reset_reason());
-    // ESP_RST_BROWNOUT = 8 → brownout
     
-    // Hardware Watchdog - 10 Seconds Timeout
     esp_task_wdt_init(10, true);
     esp_task_wdt_add(NULL);
 
-    // 1. Pre-load the safe LOW state into the register
     digitalWrite(RELAY_PIN, LOW);
     digitalWrite(GREEN_LED_PIN, LOW);
     digitalWrite(BUZZER_PIN, LOW);
     digitalWrite(RED_LED_PIN, LOW);
 
-    // 2. NOW activate the output drivers
     pinMode(RELAY_PIN, OUTPUT);
     pinMode(GREEN_LED_PIN, OUTPUT);
     pinMode(BUZZER_PIN, OUTPUT);
@@ -1292,8 +1115,8 @@ void setup() {
     if (readPointer >= MAX_EVENTS) readPointer = 0;
     if (writePointer >= MAX_EVENTS) writePointer = 0;
 
-    // Initialize the ACL Mutex
     aclMutex = xSemaphoreCreateMutex();
+    rtcMutex = xSemaphoreCreateMutex();
 
     loadAclToRAM();
     initRTC();
@@ -1305,7 +1128,7 @@ void setup() {
 }
 
 void loop() {
-    esp_task_wdt_reset(); // Feed the watchdog
+    esp_task_wdt_reset();
     handleHardwareTimers();
     handleExitButton();
     handleRFID();
