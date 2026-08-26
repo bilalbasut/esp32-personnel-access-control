@@ -31,6 +31,7 @@ client.on('message', async (topic, message) => {
     const deviceId = topicParts[3]; 
 
     // --- Process Door Scans (Events) ---
+    // --- Process Door Scans (Events) ---
     if (topic.endsWith('/event')) {
         let data;
         try {
@@ -41,13 +42,6 @@ client.on('message', async (topic, message) => {
         }
 
         const now = Math.floor(Date.now() / 1000);
-        let tsrcInt = mapTsrc[data.tsrc] ?? 2;
-
-        // If event timestamp is >10 mins in the future or before year 2025, force invalid flag
-        if (data.ts > (now + 600) || data.ts < 1735689600) {
-            console.warn(`[TIMESTAMP ANOMALY] Device ${deviceId} sent suspect ts: ${data.ts}. Marking invalid.`);
-            tsrcInt = 2; // TSRC_INVALID
-        }
 
         // Opportunistic presence/firmware tracking - "fw" only ever appears on
         // event payloads, never on heartbeats, so this is the only place it can
@@ -68,7 +62,13 @@ client.on('message', async (topic, message) => {
         const resInt = mapResult[data.res] ?? 1; // Default: 1 (unknown)
         const dirInt = mapDir[data.dir] ?? 0;    // Default: 0 (in)
         const modeInt = mapMode[data.mode] ?? 0; // Default: 0 (online)
-        const tsrcInt = mapTsrc[data.tsrc] ?? 2; // Default: 2 (invalid)
+        let tsrcInt = mapTsrc[data.tsrc] ?? 2;   // Default: 2 (invalid)
+
+        // Sanity Check: If timestamp is in the future (>10 mins) or before 2025, flag as invalid
+        if (data.ts > (now + 600) || data.ts < 1735689600) {
+            console.warn(`[TIMESTAMP ANOMALY] Device ${deviceId} sent suspect ts: ${data.ts}. Overriding tsrc to invalid.`);
+            tsrcInt = 2; // TSRC_INVALID
+        }
 
         // Find the employee_id associated with this UID
         let employeeId = null;
