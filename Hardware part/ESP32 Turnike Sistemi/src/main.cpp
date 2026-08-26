@@ -23,7 +23,7 @@
 // ============================================================
 // 1. CONFIGURATION
 // ============================================================
-#define FW_VERSION "1.6.1"
+#define FW_VERSION "1.6.2"
 #define DEVICE_ID "GATE-K3-01"
 #define FLOOR_NUMBER 3
 
@@ -122,7 +122,7 @@ MFRC522DriverSPI rfidDriver(rfidSS, hspi);
 MFRC522 rfid(rfidDriver);
 
 EthernetUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
+NTPClient timeClient(ntpUDP, "192.168.10.1", 0, 60000);
 EthernetClient ethClient;
 
 MQTTClient mqtt(4096);
