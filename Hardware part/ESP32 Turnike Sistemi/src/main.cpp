@@ -133,7 +133,6 @@ EthernetClient ethClient;
 
 MQTTClient mqtt(4096);
 TaskHandle_t NetworkTask = nullptr;
-TaskHandle_t NtpTask = nullptr;
 
 // Network Config
 byte mac[] = { 0x00, 0x1A, 0x2B, 0x3C, 0x4D, 0x5E };
@@ -858,7 +857,7 @@ void mqttCallback(String& topic, String& payload) {
 
 // Returns boolean indicating if a message is currently waiting for ack
 bool processPendingAck(bool currentlyWaiting) {
-    if (!ackReceived) return currentlyWaiting;
+    if (!currentlyWaiting || !ackReceived) return currentlyWaiting;
     ackReceived = false;
 
     if (queueIsEmpty()) return currentlyWaiting;
@@ -866,8 +865,8 @@ bool processPendingAck(bool currentlyWaiting) {
     if (!readEventRecord(readPointer, record) || !isRecordValid(record)) return currentlyWaiting;
 
     if (record.seq == pendingAckSeq) {
-        readPointer = (readPointer + 1) % MAX_EVENTS;
         portENTER_CRITICAL(&queueMux);
+        readPointer = (readPointer + 1) % MAX_EVENTS;
         if (queueCount > 0) queueCount--;
         portEXIT_CRITICAL(&queueMux);
         acksSinceCheckpoint++;
@@ -1180,50 +1179,6 @@ void initMQTT() {
     mqtt.setWill(TOPIC_STATUS, "offline", true, 1);
 }
 
-// ============================================================
-// 10b. NTP TASK (Core 0, independent of NETWORK TASK)
-// ============================================================
-// timeClient.update() has its own internal blocking behavior: when it
-// decides to actually attempt a sync, it does a DNS lookup for
-// "pool.ntp.org" and then polls for the UDP response via the library's own
-// delay(10) loop, waiting up to ~1s - and if DNS resolution itself is slow
-// or failing (plausible on a LAN without real internet access), that stacks
-// on top, easily reaching several seconds. That used to run inline inside
-// networkTaskCode()'s loop, which ALSO handles mqtt.loop(), ACK processing,
-// and command handling ("open") - so every time it fired, it froze all of
-// those for however long DNS+UDP took. Isolating it here means the retry
-// cadence below can be as aggressive as it wants without ever being able to
-// delay a door-open command or MQTT keepalive - unlike before, where a
-// tighter retry interval would have made a bad network moment worse, not
-// better, since every attempt was a shared-task stall.
-//
-// Deliberately NOT registered with the task watchdog - an occasional
-// multi-second block from a failed DNS lookup is now fully isolated here
-// and harmless on its own; it no longer has anything else to starve.
-void ntpTaskCode(void* parameter) {
-    timeClient.begin();
-
-    for (;;) {
-        if (Ethernet.linkStatus() == LinkON) {
-            timeClient.update(); // blocking (DNS + UDP wait), isolated to this task only
-
-            if (timeClient.isTimeSet()) {
-                rtcAdjustSafe(DateTime(timeClient.getEpochTime()));
-                currentTimeSource = TSRC_NTP;
-                lastNtpSync = millis();
-            }
-        }
-
-        // Dynamic interval: retry every 15s until the device has EVER synced
-        // successfully (isTimeSet() is a sticky flag in this library - once
-        // true, it stays true even if a later attempt fails), then back off
-        // to the full hourly interval. Safe to retry this fast now, since a
-        // slow/failing DNS lookup here can no longer touch networkTaskCode
-        // at all.
-        unsigned long waitMs = timeClient.isTimeSet() ? NTP_SYNC_INTERVAL_MS : 15000UL;
-        vTaskDelay(pdMS_TO_TICKS(waitMs));
-    }
-}
 
 // ============================================================
 // 11. NETWORK TASK (Core 0)
@@ -1232,6 +1187,7 @@ void networkTaskCode(void* parameter) {
     esp_task_wdt_add(NULL); // Subscribe this task to the watchdog
 
     initEthernet();
+    timeClient.begin();
     initMQTT();
 
     unsigned long lastHeartbeat = millis();
@@ -1259,6 +1215,28 @@ void networkTaskCode(void* parameter) {
         Ethernet.maintain();
 
         if (Ethernet.linkStatus() == LinkON) {
+            // Dynamic non-blocking NTP interval: 15s until valid, then hourly
+            static unsigned long lastNtpAttempt = 0;
+            unsigned long ntpInterval = timeClient.isTimeSet() ? NTP_SYNC_INTERVAL_MS : 15000UL;
+
+            if (lastNtpAttempt == 0 || now - lastNtpAttempt >= ntpInterval) {
+                lastNtpAttempt = now;
+                timeClient.update();
+
+                if (timeClient.isTimeSet()) {
+                    unsigned long epoch = timeClient.getEpochTime();
+                    
+                    // Sanity check: Epoch must be valid (between 2025-01-01 and 2035-01-01)
+                    if (epoch >= 1735689600UL && epoch <= 2051222400UL) {
+                        rtcAdjustSafe(DateTime(epoch));
+                        currentTimeSource = TSRC_NTP;
+                        lastNtpSync = now;
+                    } else {
+                        Serial.printf("WARNING: Bogus NTP epoch ignored: %lu\n", epoch);
+                    }
+                }
+            }
+
             if (!mqtt.connected()) {
                 if (now - lastReconnectAttempt >= backoff) {
                     if (mqtt.connect(DEVICE_ID)) {
@@ -1370,7 +1348,6 @@ void setup() {
     // Separate, low-priority task so NTP's occasional multi-second blocking
     // (DNS lookup + UDP wait) can never delay networkTaskCode's MQTT/command
     // handling - see the comment above ntpTaskCode() for the full reasoning.
-    xTaskCreatePinnedToCore(ntpTaskCode, "NtpTask", 4096, nullptr, 1, &NtpTask, 0);
     Serial.println("Setup complete.");
 }
 
