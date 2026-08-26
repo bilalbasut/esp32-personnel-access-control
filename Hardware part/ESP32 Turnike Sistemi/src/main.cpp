@@ -717,6 +717,15 @@ void mqttCallback(String& topic, String& payload) {
                 return;
             }
             const char* subCmd = cmdDoc["cmd"] | "";
+            
+            if (strcmp(subCmd, "settime") == 0) {
+                uint32_t newTs = cmdDoc["ts"] | 0UL;
+                if (newTs >= 1735689600UL && newTs <= 2051222400UL) {
+                    rtcAdjustSafe(DateTime(newTs));
+                    currentTimeSource = TSRC_NTP;
+                    mqtt.publish(TOPIC_CMD_RES, "settime_ok", false, 1);
+                }
+            }
 
             if (strcmp(subCmd, "ota") == 0) {
                 String otaUrl = cmdDoc["url"] | "";
