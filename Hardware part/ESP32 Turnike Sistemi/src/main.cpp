@@ -23,9 +23,10 @@
 // ============================================================
 // 1. CONFIGURATION
 // ============================================================
-#define FW_VERSION "1.6.3"
+#define FW_VERSION "1.6.4"
 #define DEVICE_ID "GATE-K3-01"
 #define FLOOR_NUMBER 3
+#define DEVICE_DIR DIR_IN // Options: DIR_IN (0) or DIR_OUT (1)
 
 // Hardware Pins
 #define RELAY_PIN       32
@@ -134,7 +135,7 @@ IPAddress deviceIP(192, 168, 11, 155);
 IPAddress dnsIP(192, 168, 10, 1);
 IPAddress gatewayIP(192, 168, 10, 1);
 IPAddress subnetMask(255, 255, 254, 0);
-IPAddress mqttServer(192, 168, 10, 70);
+IPAddress mqttServer(192, 168, 10, 201);
 const uint16_t MQTT_PORT = 1883;
 
 // Topics
@@ -726,7 +727,7 @@ void mqttCallback(String& topic, String& payload) {
         if (payload == "open") {
             static const uint8_t remoteUid[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
             DateTime now = rtcNowSafe();
-            bool logged = logAccess(now, remoteUid, 7, DIR_IN, RESULT_MANUAL);
+            bool logged = logAccess(now, remoteUid, 7, DEVICE_DIR, RESULT_MANUAL);
 
             grantAccess();
             mqtt.publish(TOPIC_CMD_RES, logged ? "open_ok" : "open_ok_unlogged", false, 1);
@@ -973,7 +974,7 @@ void handleRFID() {
     DateTime now = rtcNowSafe();
     uint8_t resultCode = evaluateAccess(uidBytes, uidLen, now);
 
-    if (logAccess(now, uidBytes, uidLen, DIR_IN, resultCode)) {
+    if (logAccess(now, uidBytes, uidLen, DEVICE_DIR, resultCode)) {
         if (resultCode == RESULT_GRANTED) {
             grantAccess();
         } else {
