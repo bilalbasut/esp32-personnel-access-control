@@ -23,7 +23,7 @@
 // ============================================================
 // 1. CONFIGURATION
 // ============================================================
-#define FW_VERSION "1.6.4"
+#define FW_VERSION "1.6.6"
 #define DEVICE_ID "GATE-K3-01"
 #define FLOOR_NUMBER 3
 #define DEVICE_DIR DIR_IN // Options: DIR_IN (0) or DIR_OUT (1)
@@ -123,7 +123,7 @@ MFRC522DriverSPI rfidDriver(rfidSS, hspi);
 MFRC522 rfid(rfidDriver);
 
 EthernetUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "192.168.10.1", 0, 60000);
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
 EthernetClient ethClient;
 
 MQTTClient mqtt(4096);
@@ -132,7 +132,7 @@ TaskHandle_t NetworkTask = nullptr;
 // Network Config
 byte mac[] = { 0x00, 0x1A, 0x2B, 0x3C, 0x4D, 0x5E };
 IPAddress deviceIP(192, 168, 11, 155);
-IPAddress dnsIP(192, 168, 10, 1);
+IPAddress dnsIP(8, 8, 8, 8); // Google DNS
 IPAddress gatewayIP(192, 168, 10, 1);
 IPAddress subnetMask(255, 255, 254, 0);
 IPAddress mqttServer(192, 168, 10, 201);
@@ -757,8 +757,11 @@ void mqttCallback(String& topic, String& payload) {
                 uint32_t newTs = cmdDoc["ts"] | 0UL;
                 if (newTs >= 1735689600UL && newTs <= 2051222400UL) {
                     rtcAdjustSafe(DateTime(newTs));
-                    currentTimeSource = TSRC_NTP;
+                    currentTimeSource = TSRC_RTC;
                     mqtt.publish(TOPIC_CMD_RES, "settime_ok", false, 1);
+                    Serial.printf("RTC time set manually to: %lu\n", newTs);
+                } else {
+                    mqtt.publish(TOPIC_CMD_RES, "settime_failed_invalid_ts", false, 1);
                 }
             }
 
