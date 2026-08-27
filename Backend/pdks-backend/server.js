@@ -541,6 +541,9 @@ app.delete('/api/cards/:uid', async (req, res) => {
 });
 
 // POST: Send remote command to ESP32
+// In-memory monotonic command sequence counter (starts from current second)
+let serverCmdSeq = Math.floor(Date.now() / 1000);
+
 app.post('/api/devices/:id/command', (req, res) => {
     const { id } = req.params;
     const { cmd, ts } = req.body; 
@@ -550,21 +553,30 @@ app.post('/api/devices/:id/command', (req, res) => {
         return res.status(400).json({ error: 'Invalid command.' });
     }
 
+    const now = Math.floor(Date.now() / 1000);
+    const seq = ++serverCmdSeq;
     const cmdTopic = `pdks/merkez/dev/${id}/cmd`;
 
-    // Package 'settime' as structured JSON containing the UTC epoch
-    let payload = cmd;
+    // Uniform JSON envelope for all commands
+    const payloadObj = {
+        seq: seq,
+        cmd: cmd,
+        ts: now,
+        params: {}
+    };
+
     if (cmd === 'settime') {
-        const epoch = Number.isInteger(ts) ? ts : Math.floor(Date.now() / 1000);
-        payload = JSON.stringify({ cmd: 'settime', ts: epoch });
+        payloadObj.params.ts = Number.isInteger(ts) ? ts : now;
     }
+
+    const payload = JSON.stringify(payloadObj);
     
     client.publish(cmdTopic, payload, { qos: 1 }, (err) => {
         if (err) {
             console.error(`Failed to send ${cmd} to ${id}:`, err);
             return res.status(500).json({ error: 'Failed to send command.' });
         }
-        res.json({ message: `Command '${cmd}' queued for device ${id}.`, payload });
+        res.json({ message: `Command '${cmd}' queued for device ${id}.`, seq });
     });
 });
 

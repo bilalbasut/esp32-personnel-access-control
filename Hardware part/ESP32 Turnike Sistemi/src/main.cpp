@@ -126,7 +126,7 @@ EthernetUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000);
 EthernetClient ethClient;
 
-MQTTClient mqtt(4096);
+MQTTClient mqtt(16384); // 16KB buffer for large ACL messages
 TaskHandle_t NetworkTask = nullptr;
 
 // Network Config
@@ -155,6 +155,7 @@ volatile bool rebootPending = false;
 unsigned long rebootRequestedAt = 0;
 uint32_t eventsSinceCheckpoint = 0, acksSinceCheckpoint = 0;
 std::vector<AclRecord> aclList;
+uint32_t lastCmdSeq = 0;
 
 // FreeRTOS Synchronization
 portMUX_TYPE queueMux = portMUX_INITIALIZER_UNLOCKED;
@@ -723,49 +724,73 @@ void mqttCallback(String& topic, String& payload) {
         aclMessageReceived = true;
     } else if (topic == TOPIC_CMD) {
         Serial.println("Remote command received: " + payload);
-        
-        if (payload == "open") {
-            static const uint8_t remoteUid[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-            DateTime now = rtcNowSafe();
-            bool logged = logAccess(now, remoteUid, 7, DEVICE_DIR, RESULT_MANUAL);
 
-            grantAccess();
-            mqtt.publish(TOPIC_CMD_RES, logged ? "open_ok" : "open_ok_unlogged", false, 1);
-            if (!logged) Serial.println("WARNING: Remote open succeeded but the event was not logged.");
-            
-        } else if (payload == "reboot") {
-            mqtt.publish(TOPIC_CMD_RES, "rebooting", false, 1);
-            rebootPending = true;
-            rebootRequestedAt = millis();
-            
-        } else if (payload == "sync") {
-            currentAclVersion = 0;
-            preferences.putUInt("aclVer", 0);
-            mqtt.subscribe(TOPIC_ACL, 1);
-            mqtt.publish(TOPIC_CMD_RES, "sync_triggered", false, 1);
-
-        } else if (payload.startsWith("{")) {
+        if (payload.startsWith("{")) {
             JsonDocument cmdDoc;
             if (deserializeJson(cmdDoc, payload)) {
                 Serial.println("Invalid command JSON.");
                 mqtt.publish(TOPIC_CMD_RES, "cmd_failed_bad_json", false, 1);
                 return;
             }
+
+            uint32_t seq = cmdDoc["seq"] | 0UL;
             const char* subCmd = cmdDoc["cmd"] | "";
-            
-            if (strcmp(subCmd, "settime") == 0) {
+            uint32_t cmdTs = cmdDoc["ts"] | 0UL;
+
+            // 1. DEDUPLICATION: Ignore re-transmissions of already executed sequences
+            if (seq <= lastCmdSeq && seq != 0) {
+                Serial.printf("Duplicate command seq=%u ignored.\n", seq);
+                mqtt.publish(TOPIC_CMD_RES, "cmd_duplicate_ignored", false, 1);
+                return;
+            }
+
+            // 2. TTL CHECK: Discard commands older than 15s (prevents burst after reconnect)
+            DateTime now = rtcNowSafe();
+            if (currentTimeSource != TSRC_INVALID && cmdTs > 0) {
+                if (now.unixtime() > (cmdTs + 15)) {
+                    Serial.printf("Expired command '%s' (sent %lu, now %lu) discarded.\n",
+                                  subCmd, cmdTs, now.unixtime());
+                    mqtt.publish(TOPIC_CMD_RES, "cmd_expired_discarded", false, 1);
+                    lastCmdSeq = seq;
+                    return;
+                }
+            }
+
+            // Mark sequence as seen
+            lastCmdSeq = seq;
+
+            // 3. EXECUTE COMMANDS
+            if (strcmp(subCmd, "open") == 0) {
+                static const uint8_t remoteUid[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+                bool logged = logAccess(now, remoteUid, 7, DIR_IN, RESULT_MANUAL);
+                grantAccess();
+                mqtt.publish(TOPIC_CMD_RES, logged ? "open_ok" : "open_ok_unlogged", false, 1);
+                if (!logged) Serial.println("WARNING: Remote open succeeded but the event was not logged.");
+
+            } else if (strcmp(subCmd, "reboot") == 0) {
+                mqtt.publish(TOPIC_CMD_RES, "rebooting", false, 1);
+                rebootPending = true;
+                rebootRequestedAt = millis();
+
+            } else if (strcmp(subCmd, "sync") == 0) {
+                currentAclVersion = 0;
+                preferences.putUInt("aclVer", 0);
+                mqtt.subscribe(TOPIC_ACL, 1);
+                mqtt.publish(TOPIC_CMD_RES, "sync_triggered", false, 1);
+
+            } else if (strcmp(subCmd, "settime") == 0) {
                 uint32_t newTs = cmdDoc["ts"] | 0UL;
                 if (newTs >= 1735689600UL && newTs <= 2051222400UL) {
                     rtcAdjustSafe(DateTime(newTs));
                     currentTimeSource = TSRC_RTC;
+                    lastNtpSync = millis();
                     mqtt.publish(TOPIC_CMD_RES, "settime_ok", false, 1);
-                    Serial.printf("RTC time set manually to: %lu\n", newTs);
+                    Serial.printf("RTC time updated via backend command to: %lu\n", newTs);
                 } else {
                     mqtt.publish(TOPIC_CMD_RES, "settime_failed_invalid_ts", false, 1);
                 }
-            }
 
-            if (strcmp(subCmd, "ota") == 0) {
+            } else if (strcmp(subCmd, "ota") == 0) {
                 String otaUrl = cmdDoc["url"] | "";
                 String otaMd5 = cmdDoc["md5"] | "";
                 uint32_t otaSize = cmdDoc["size"] | 0UL;

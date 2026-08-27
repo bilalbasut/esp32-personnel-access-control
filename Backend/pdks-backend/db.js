@@ -94,6 +94,8 @@ const initDB = async () => {
         ALTER TABLE devices ADD COLUMN IF NOT EXISTS ota_updated_at BIGINT;
 
         CREATE SEQUENCE IF NOT EXISTS acl_version_seq START 1;
+
+        CREATE SEQUENCE IF NOT EXISTS cmd_sequence START 1;
     `;
 
     try {
