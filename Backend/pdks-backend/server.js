@@ -82,53 +82,92 @@ function validateFloorsAndWindow(floors, windowStart, windowEnd) {
     return null;
 }
 
-// --- HELPER FUNCTION: AUTOMATED ACL PUBLISHER ---
-// Builds the JSON payload the ESP32 firmware actually needs and pushes it
-// to the broker as a retained message.
 
-// Seeded from wall-clock time so a restarted server still issues a version
-// higher than whatever the device last saved (its "ver" persists in NVS
-// across firmware reboots too). Bumped explicitly on every publish so two
-// calls in the same second/millisecond (e.g. add then revoke back-to-back)
-// can never produce an equal version - the firmware ignores non-increasing
-// versions (`if (newVersion <= currentAclVersion) return;`), so a collision
-// here means a real ACL change silently never reaches the device.
-let lastPublishedAclVersion = Math.floor(Date.now() / 1000);
-
+// --- BINARY ACL PUBLISHER ---
+// Wire Format:
+//   Header (8 bytes):
+//     - ver:        uint32 LE (4 bytes)
+//     - card_count: uint32 LE (4 bytes)
+//   Records (20 bytes each):
+//     - uid:          7 bytes (raw hex bytes, padded with 0x00)
+//     - uidLen:       uint8   (1 byte)
+//     - floor_mask:   uint32 LE (4 bytes)
+//     - valid_to:     uint32 LE (4 bytes)
+//     - win_start_m:  uint16 LE (2 bytes)
+//     - win_end_m:    uint16 LE (2 bytes)
 const publishAclUpdate = async () => {
     try {
         const result = await pool.query(
             'SELECT uid, floors, valid_to, win_start_m, win_end_m FROM cards WHERE aktif = 1'
         );
 
-        // Fetch strictly incrementing version number (1, 2, 3, 4...)
+        // Fetch strictly incrementing version number
         const seqResult = await pool.query("SELECT nextval('acl_version_seq') AS ver");
         const newVersion = parseInt(seqResult.rows[0].ver, 10);
+        const activeCards = result.rows;
+        const cardCount = activeCards.length;
 
-        const activeCards = result.rows.map((row) => {
-            const card = {
-                uid: row.uid,
-                floors: parseFloors(row.floors),
-                valid_to: row.valid_to !== null ? Number(row.valid_to) : 4294967295,
-            };
+        const HEADER_SIZE = 8;
+        const RECORD_SIZE = 20;
+        const buffer = Buffer.alloc(HEADER_SIZE + (cardCount * RECORD_SIZE));
 
+        // Write Header
+        buffer.writeUInt32LE(newVersion, 0);
+        buffer.writeUInt32LE(cardCount, 4);
+
+        let offset = HEADER_SIZE;
+        for (const row of activeCards) {
+            const normalizedUid = String(row.uid).trim().toUpperCase();
+            const uidBuf = Buffer.from(normalizedUid, 'hex');
+            const uidLen = Math.min(uidBuf.length, 7);
+
+            // uid (7 bytes)
+            uidBuf.copy(buffer, offset, 0, uidLen);
+            if (uidLen < 7) {
+                buffer.fill(0, offset + uidLen, offset + 7);
+            }
+            offset += 7;
+
+            // uidLen (1 byte)
+            buffer.writeUInt8(uidLen, offset);
+            offset += 1;
+
+            // floor_mask (uint32 LE bitmask)
+            let floorMask = 0;
+            const floors = parseFloors(row.floors);
+            for (const f of floors) {
+                if (f >= 0 && f < 32) {
+                    floorMask |= (1 << f);
+                }
+            }
+            buffer.writeUInt32LE(floorMask >>> 0, offset);
+            offset += 4;
+
+            // valid_to (uint32 LE)
+            const validTo = row.valid_to !== null ? Number(row.valid_to) : 0xFFFFFFFF;
+            buffer.writeUInt32LE(validTo >>> 0, offset);
+            offset += 4;
+
+            // win_start_m & win_end_m (uint16 LE)
             const startM = Number.isFinite(row.win_start_m) ? row.win_start_m : 0;
             const endM = Number.isFinite(row.win_end_m) ? row.win_end_m : 1440;
-            if (!(startM === 0 && endM === 1440)) {
-                card.win = formatWindow(startM, endM);
+            buffer.writeUInt16LE(startM, offset);
+            offset += 2;
+            buffer.writeUInt16LE(endM, offset);
+            offset += 2;
+        }
+
+        client.publish(
+            'pdks/merkez/cfg/acl',
+            buffer,
+            { qos: 1, retain: true },
+            (err) => {
+                if (err) console.error('Failed to publish binary ACL to broker:', err);
+                else console.log(`[ACL UPDATE] Binary Version ${newVersion} (${cardCount} cards, ${buffer.length} bytes) published.`);
             }
-            return card;
-        });
-
-        const aclPayload = JSON.stringify({
-            ver: newVersion,
-            cards: activeCards,
-        });
-
-        client.publish('pdks/merkez/cfg/acl', aclPayload, { qos: 1, retain: true });
-        console.log(`[ACL UPDATE] Incremental Version ${newVersion} published.`);
+        );
     } catch (err) {
-        console.error('Error generating ACL:', err);
+        console.error('Error generating binary ACL:', err);
     }
 };
 

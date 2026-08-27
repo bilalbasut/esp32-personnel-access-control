@@ -23,7 +23,7 @@
 // ============================================================
 // 1. CONFIGURATION
 // ============================================================
-#define FW_VERSION "1.7.0"
+#define FW_VERSION "1.8.0"
 #define DEVICE_ID "GATE-K3-01"
 #define FLOOR_NUMBER 3
 #define DEVICE_DIR DIR_IN // Options: DIR_IN (0) or DIR_OUT (1)
@@ -105,6 +105,13 @@ struct AclRecord {
 };
 #pragma pack(pop)
 
+#pragma pack(push, 1)
+struct AclHeader {
+    uint32_t ver;
+    uint32_t count;
+};
+#pragma pack(pop)
+
 static_assert(sizeof(AccessRecord) == RECORD_SIZE, "AccessRecord must be 32 bytes");
 
 enum Direction : uint8_t { DIR_IN = 0, DIR_OUT = 1 };
@@ -181,7 +188,7 @@ unsigned long lastScanTime = 0;
 volatile bool ackReceived = false;
 volatile uint32_t pendingAckSeq = 0;
 volatile bool aclMessageReceived = false;
-String pendingAclPayload;
+std::vector<uint8_t> pendingAclBytes;
 
 // ============================================================
 // 4. HELPERS (CRC, UID, Formatting, Thread-Safe RTC)
@@ -713,16 +720,24 @@ bool performOTA(const String& url, const String& expectedMd5, uint32_t expectedS
 // ============================================================
 // 8. MQTT & NETWORKING
 // ============================================================
-void mqttCallback(String& topic, String& payload) {
-    if (topic == TOPIC_EVENT_ACK) {
+void mqttCallback(MQTTClient *client, char topic[], char bytes[], int length) {
+    String topicStr = topic;
+
+    if (topicStr == TOPIC_EVENT_ACK) {
         JsonDocument doc;
-        if (deserializeJson(doc, payload)) { Serial.println("Invalid ACK JSON."); return; }
+        if (deserializeJson(doc, bytes, length)) return;
         pendingAckSeq = doc["ack_seq"] | 0UL;
         ackReceived = true;
-    } else if (topic == TOPIC_ACL) {
-        pendingAclPayload = payload;
-        aclMessageReceived = true;
-    } else if (topic == TOPIC_CMD) {
+
+    } else if (topicStr == TOPIC_ACL) {
+        // Binary ACL payload reception
+        if (length >= (int)sizeof(AclHeader)) {
+            pendingAclBytes.assign((uint8_t*)bytes, (uint8_t*)bytes + length);
+            aclMessageReceived = true;
+        }
+
+    } else if (topicStr == TOPIC_CMD) {
+        String payload = String(bytes, length);
         Serial.println("Remote command received: " + payload);
 
         if (payload.startsWith("{")) {
@@ -737,35 +752,30 @@ void mqttCallback(String& topic, String& payload) {
             const char* subCmd = cmdDoc["cmd"] | "";
             uint32_t cmdTs = cmdDoc["ts"] | 0UL;
 
-            // 1. DEDUPLICATION: Ignore re-transmissions of already executed sequences
             if (seq <= lastCmdSeq && seq != 0) {
                 Serial.printf("Duplicate command seq=%u ignored.\n", seq);
                 mqtt.publish(TOPIC_CMD_RES, "cmd_duplicate_ignored", false, 1);
                 return;
             }
 
-            // 2. TTL CHECK: Discard commands older than 15s (prevents burst after reconnect)
             DateTime now = rtcNowSafe();
             if (currentTimeSource != TSRC_INVALID && cmdTs > 0) {
                 if (now.unixtime() > (cmdTs + 15)) {
-                    Serial.printf("Expired command '%s' (sent %lu, now %lu) discarded.\n",
-                                  subCmd, cmdTs, now.unixtime());
+                    Serial.printf("Expired command '%s' discarded.\n", subCmd);
                     mqtt.publish(TOPIC_CMD_RES, "cmd_expired_discarded", false, 1);
                     lastCmdSeq = seq;
                     return;
                 }
             }
 
-            // Mark sequence as seen
             lastCmdSeq = seq;
 
-            // 3. EXECUTE COMMANDS
             if (strcmp(subCmd, "open") == 0) {
                 static const uint8_t remoteUid[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
                 bool logged = logAccess(now, remoteUid, 7, DIR_IN, RESULT_MANUAL);
                 grantAccess();
                 mqtt.publish(TOPIC_CMD_RES, logged ? "open_ok" : "open_ok_unlogged", false, 1);
-                if (!logged) Serial.println("WARNING: Remote open succeeded but the event was not logged.");
+                if (!logged) Serial.println("WARNING: Remote open succeeded but event logging failed.");
 
             } else if (strcmp(subCmd, "reboot") == 0) {
                 mqtt.publish(TOPIC_CMD_RES, "rebooting", false, 1);
@@ -871,83 +881,64 @@ void processACLUpdate() {
     if (!aclMessageReceived) return;
     aclMessageReceived = false;
 
-    JsonDocument doc; 
-    if (deserializeJson(doc, pendingAclPayload)) { Serial.println("ACL JSON parse failed."); return; }
-
-    if (!doc["ver"].is<uint32_t>() || !doc["cards"].is<JsonArray>()) {
-        Serial.println("ERROR: Malformed ACL payload structure. Aborting update.");
+    if (pendingAclBytes.size() < sizeof(AclHeader)) {
+        pendingAclBytes.clear();
         return;
     }
 
-    uint32_t newVersion = doc["ver"].as<uint32_t>();
-    if (newVersion <= currentAclVersion) return;
+    AclHeader* hdr = reinterpret_cast<AclHeader*>(pendingAclBytes.data());
+    uint32_t newVersion = hdr->ver;
+    uint32_t cardCount = hdr->count;
+
+    size_t expectedSize = sizeof(AclHeader) + (cardCount * sizeof(AclRecord));
+    if (pendingAclBytes.size() != expectedSize) {
+        Serial.printf("ERROR: Binary ACL size mismatch (got %u, expected %u)\n", 
+                      pendingAclBytes.size(), expectedSize);
+        pendingAclBytes.clear();
+        return;
+    }
+
+    if (newVersion <= currentAclVersion) {
+        pendingAclBytes.clear();
+        return;
+    }
 
     File dbFile = LittleFS.open("/database.tmp", FILE_WRITE);
-    if (!dbFile) { Serial.println("ERROR: ACL temp file unavailable."); return; }
-
-    JsonArray cards = doc["cards"].as<JsonArray>();
-    for (JsonVariant card : cards) {
-        if (!card.is<JsonObject>()) continue;
-
-        const char* uidCstr = card["uid"] | "";
-        size_t uidCstrLen = strlen(uidCstr);
-
-        if (!isValidHex(uidCstr, uidCstrLen)) {
-            Serial.printf("WARNING: Invalid UID '%s' in ACL update. Skipping card.\n", uidCstr);
-            continue;
-        }
-
-        AclRecord record = {};
-        record.uidLen = min(uidCstrLen / 2, (size_t)7);
-        hexToBytes(uidCstr, uidCstrLen, record.uid, 7);
-        
-        if (card["floors"].is<JsonArray>()) {
-            JsonArray floors = card["floors"].as<JsonArray>();
-            for (JsonVariant f : floors) {
-                uint8_t floorNum = f.as<uint8_t>();
-                if (floorNum < 32) record.floor_mask |= (1UL << floorNum);
-            }
-        }
-        
-        record.valid_to = card["valid_to"] | 0xFFFFFFFF; 
-        
-        const char* win = card["win"] | "";
-        int startH, startM, endH, endM;
-        if (strlen(win) == 11 && sscanf(win, "%d:%d-%d:%d", &startH, &startM, &endH, &endM) == 4) {
-            if (startH >= 0 && startH < 24 && startM >= 0 && startM < 60 &&
-                endH >= 0 && endH <= 24 && endM >= 0 && endM < 60) {
-                record.win_start_m = (startH * 60) + startM;
-                record.win_end_m = (endH * 60) + endM;
-            } else {
-                record.win_start_m = 0;
-                record.win_end_m = 1440;
-            }
-        } else {
-            record.win_start_m = 0;
-            record.win_end_m = 1440;
-        }
-
-        dbFile.write(reinterpret_cast<const uint8_t*>(&record), sizeof(AclRecord));
+    if (!dbFile) {
+        Serial.println("ERROR: Cannot open /database.tmp for writing.");
+        pendingAclBytes.clear();
+        return;
     }
-    dbFile.flush(); 
+
+    // Write all records directly to flash in one contiguous operation
+    const uint8_t* recordsPtr = pendingAclBytes.data() + sizeof(AclHeader);
+    size_t bytesToWrite = cardCount * sizeof(AclRecord);
+
+    if (bytesToWrite > 0) {
+        dbFile.write(recordsPtr, bytesToWrite);
+    }
+    dbFile.flush();
     dbFile.close();
 
-    if (LittleFS.exists("/database.bin")) {
-        LittleFS.rename("/database.bin", "/database.bak");
-    }
-    
-    if (!LittleFS.rename("/database.tmp", "/database.bin")) { 
-        Serial.println("ERROR: ACL rename failed."); 
+    // Free reception buffer immediately
+    pendingAclBytes.clear();
+    pendingAclBytes.shrink_to_fit();
+
+    // Atomic file swap
+    if (LittleFS.exists("/database.bin")) LittleFS.rename("/database.bin", "/database.bak");
+    if (!LittleFS.rename("/database.tmp", "/database.bin")) {
+        Serial.println("ERROR: ACL file rename failed.");
         if (LittleFS.exists("/database.bak")) LittleFS.rename("/database.bak", "/database.bin");
-        return; 
+        return;
     }
-    
     if (LittleFS.exists("/database.bak")) LittleFS.remove("/database.bak");
 
+    // Load newly saved binary records into RAM
     loadAclToRAM();
     currentAclVersion = newVersion;
     preferences.putUInt("aclVer", currentAclVersion);
-    Serial.printf("ACL updated to version %d\n", currentAclVersion);
+    Serial.printf("Binary ACL updated: ver=%u, cards=%u (%u bytes)\n", 
+                  currentAclVersion, cardCount, bytesToWrite);
 }
 
 // ============================================================
@@ -962,7 +953,7 @@ void handleExitButton() {
             if (stableExitButtonState == LOW && !isRelayActive) {
                 static const uint8_t zeroUid[7] = {0};
                 DateTime now = rtcNowSafe();
-                if (logAccess(now, zeroUid, 7, DIR_OUT, RESULT_MANUAL)) {
+                if (logAccess(now, zeroUid, 7, DEVICE_DIR, RESULT_MANUAL)) {
                     grantAccess();
                     Serial.println("EXIT BUTTON -> GRANTED");
                 } else {
@@ -1081,7 +1072,7 @@ void initEthernet() {
 void initMQTT() {
     mqtt.begin(mqttServer, MQTT_PORT, ethClient);
     mqtt.setOptions(30, false, 1000);
-    mqtt.onMessage(mqttCallback);
+    mqtt.onMessageAdvanced(mqttCallback);
     mqtt.setWill(TOPIC_STATUS, "offline", true, 1);
 }
 
