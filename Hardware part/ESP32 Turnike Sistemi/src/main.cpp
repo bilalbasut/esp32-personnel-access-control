@@ -23,7 +23,7 @@
 // ============================================================
 // 1. CONFIGURATION
 // ============================================================
-#define FW_VERSION "1.6.6"
+#define FW_VERSION "1.7.0"
 #define DEVICE_ID "GATE-K3-01"
 #define FLOOR_NUMBER 3
 #define DEVICE_DIR DIR_IN // Options: DIR_IN (0) or DIR_OUT (1)
