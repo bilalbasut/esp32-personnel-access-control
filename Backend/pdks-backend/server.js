@@ -157,11 +157,27 @@ const publishAclUpdate = async () => {
             offset += 4;
 
             // win_start_m & win_end_m (uint16 LE)
-            const startM = Number.isFinite(row.win_start_m) ? row.win_start_m : 0;
-            const endM = Number.isFinite(row.win_end_m) ? row.win_end_m : 1440;
-            buffer.writeUInt16LE(startM, offset);
+            // windows (uint16 LE) - Convert local time (Europe/Istanbul UTC+3) to UTC minutes
+            const localStartM = Number.isFinite(row.win_start_m) ? row.win_start_m : 0;
+            const localEndM = Number.isFinite(row.win_end_m) ? row.win_end_m : 1440;
+
+            let utcStartM = localStartM;
+            let utcEndM = localEndM;
+
+            // Only convert if not full-day access (0 to 1440)
+            if (!(localStartM === 0 && localEndM === 1440)) {
+                const TZ_OFFSET_MINUTES = parseInt(process.env.TZ_OFFSET_MINUTES, 10) || 180; // Turkey = +180 mins
+                
+                utcStartM = (localStartM - TZ_OFFSET_MINUTES) % 1440;
+                if (utcStartM < 0) utcStartM += 1440;
+
+                utcEndM = (localEndM - TZ_OFFSET_MINUTES) % 1440;
+                if (utcEndM < 0) utcEndM += 1440;
+            }
+
+            buffer.writeUInt16LE(utcStartM, offset);
             offset += 2;
-            buffer.writeUInt16LE(endM, offset);
+            buffer.writeUInt16LE(utcEndM, offset);
             offset += 2;
         }
 

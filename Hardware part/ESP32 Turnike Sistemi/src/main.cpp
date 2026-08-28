@@ -427,20 +427,32 @@ uint8_t evaluateAccess(const uint8_t* scannedUid, uint8_t uidLen, const DateTime
     if (xSemaphoreTake(aclMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         auto it = std::lower_bound(aclList.begin(), aclList.end(), target, compareAclRecords);
         
+        // 1. UID Existence Check
         if (it == aclList.end() || target.uidLen != it->uidLen || memcmp(target.uid, it->uid, target.uidLen) != 0) {
             result = RESULT_UNKNOWN;
+
+        // 2. Expiration Check
         } else if (now.unixtime() > it->valid_to) {
             result = RESULT_EXPIRED;
+
+        // 3. Floor Bitmask Check
         } else if ((it->floor_mask & (1UL << FLOOR_NUMBER)) == 0) {
             result = RESULT_UNKNOWN; 
+
+        // 4. Schedule Window Check (Cross-midnight & UTC-safe)
+        } else if (!(it->win_start_m == 0 && it->win_end_m == 1440)) {
+            uint16_t currentMinute = (now.hour() * 60) + now.minute();
+            bool inWindow = (it->win_start_m <= it->win_end_m)
+                ? (currentMinute >= it->win_start_m && currentMinute <= it->win_end_m)
+                : (currentMinute >= it->win_start_m || currentMinute <= it->win_end_m);
+
+            result = inWindow ? RESULT_GRANTED : RESULT_SCHEDULE;
+
+        // 5. Full-Day Access Allowed
         } else {
-            uint16_t current_minutes = (now.hour() * 60) + now.minute();
-            if (current_minutes < it->win_start_m || current_minutes >= it->win_end_m) {
-                result = RESULT_SCHEDULE;
-            } else {
-                result = RESULT_GRANTED;
-            }
+            result = RESULT_GRANTED;
         }
+
         xSemaphoreGive(aclMutex);
     } else {
         Serial.println("ERROR: Could not acquire ACL mutex.");
