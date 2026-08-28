@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { to: '/cards', label: 'Cards', icon: '🪪' },
   { to: '/reports', label: 'PDKS Reports', icon: '📅' },
   { to: '/firmware', label: 'Firmware / OTA', icon: '💾' },
+  { to: '/audit', label: 'Audit Log', icon: '📝' },
 ];
 
 function Layout() {

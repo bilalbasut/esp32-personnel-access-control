@@ -99,21 +99,25 @@ function Reports() {
                   <th>Department</th>
                   <th>First In</th>
                   <th>Last Out</th>
-                  <th>Duration</th>
+                  <th>Total Work Duration</th>
+                  <th>Yemek Molası</th>
+                  <th>Mola</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.length === 0 && (
-                  <tr><td colSpan="6" className="text-center text-muted py-3">No records in this range</td></tr>
+                  <tr><td colSpan="8" className="text-center text-muted py-3">No records in this range</td></tr>
                 )}
                 {rows.map((r, idx) => (
                   <tr key={idx}>
                     <td>{r.working_date}</td>
                     <td>{r.ad_soyad}</td>
                     <td>{r.departman || '—'}</td>
-                    <td>{r.first_in ? formatTimeOnly(r.first_in) : <span className="text-muted">—</span>}</td>
-                    <td>{r.last_out ? formatTimeOnly(r.last_out) : <span className="text-muted">Still in / no exit</span>}</td>
-                    <td>{formatDuration(r.duration_seconds)}</td>
+                    <td>{r.first_in_main ? formatTimeOnly(r.first_in_main) : <span className="text-muted">—</span>}</td>
+                    <td>{r.last_out_main ? formatTimeOnly(r.last_out_main) : <span className="text-muted">Still in / no exit</span>}</td>
+                    <td><span className="badge bg-primary text-white">{formatDuration(r.total_work_seconds)}</span></td>
+                    <td>{formatDuration(r.yemek_molasi_seconds)}</td>
+                    <td>{formatDuration(r.mola_seconds)}</td>
                   </tr>
                 ))}
               </tbody>

@@ -82,6 +82,14 @@ function validateFloorsAndWindow(floors, windowStart, windowEnd) {
     return null;
 }
 
+// Helper to format raw seconds into HH:MM:SS for reporting
+function formatDuration(sec) {
+    if (!sec || sec < 0) return '00:00:00';
+    const hrs = Math.floor(sec / 3600).toString().padStart(2, '0');
+    const mins = Math.floor((sec % 3600) / 60).toString().padStart(2, '0');
+    const secs = Math.floor(sec % 60).toString().padStart(2, '0');
+    return `${hrs}:${mins}:${secs}`;
+}
 
 // --- BINARY ACL PUBLISHER ---
 // Wire Format:
@@ -385,6 +393,12 @@ function csvField(value) {
 }
 
 // GET: Date-range PDKS Report with optional CSV export
+// Dynamically resolves zones by device prefix:
+//   - GATE-K3-* -> MAIN (Main Gate Turnstiles)
+//   - GATE-K2-* -> BREAK_ROOM (Break Room Turnstiles)
+//   - GATE-K1-* -> MESS_HALL (Mess Hall Turnstiles)
+// Calculates pure working time from Main Gate IN -> OUT intervals without
+// deducting break/meal times, which are tracked independently as informational metrics.
 app.get('/api/reports/pdks', async (req, res) => {
     const { start_ts, end_ts, format, employee_id } = req.query;
     
@@ -402,48 +416,104 @@ app.get('/api/reports/pdks', async (req, res) => {
 
     try {
         const query = `
+            WITH tagged_events AS (
+                SELECT 
+                    a.employee_id,
+                    CASE 
+                        WHEN a.device_id LIKE 'GATE-K3-%' THEN 'MAIN'
+                        WHEN a.device_id LIKE 'GATE-K2-%' THEN 'BREAK_ROOM'
+                        WHEN a.device_id LIKE 'GATE-K1-%' THEN 'MESS_HALL'
+                        ELSE 'MAIN'
+                    END AS zone,
+                    TO_CHAR(TO_TIMESTAMP(a.ts_utc) AT TIME ZONE $3, 'YYYY-MM-DD') AS working_date,
+                    a.ts_utc,
+                    a.dir,
+                    a.result
+                FROM access_events a
+                WHERE a.ts_utc >= $1 AND a.ts_utc <= $2
+                  AND a.result IN (0, 4) -- granted or manual
+                  AND ($4::int IS NULL OR a.employee_id = $4::int)
+            ),
+            event_pairs AS (
+                SELECT 
+                    employee_id,
+                    zone,
+                    working_date,
+                    ts_utc,
+                    dir,
+                    LEAD(ts_utc) OVER (
+                        PARTITION BY employee_id, zone, working_date
+                        ORDER BY ts_utc
+                    ) AS next_ts,
+                    LEAD(dir) OVER (
+                        PARTITION BY employee_id, zone, working_date
+                        ORDER BY ts_utc
+                    ) AS next_dir
+                FROM tagged_events
+            ),
+            daily_zone_totals AS (
+                SELECT 
+                    employee_id,
+                    working_date,
+                    -- Day boundaries at the Main Gate (GATE-K3-*)
+                    MIN(ts_utc) FILTER (WHERE zone = 'MAIN' AND dir = 0) AS first_in_main,
+                    MAX(ts_utc) FILTER (WHERE zone = 'MAIN' AND dir = 1) AS last_out_main,
+                    
+                    -- Working time = sum of all (Main Gate IN -> Main Gate OUT) durations
+                    COALESCE(SUM(next_ts - ts_utc) FILTER (
+                        WHERE zone = 'MAIN' AND dir = 0 AND next_dir = 1
+                    ), 0) AS total_work_seconds,
+
+                    -- Yemek Molası = sum of all (Mess Hall GATE-K1-* IN -> OUT) durations
+                    COALESCE(SUM(next_ts - ts_utc) FILTER (
+                        WHERE zone = 'MESS_HALL' AND dir = 0 AND next_dir = 1
+                    ), 0) AS yemek_molasi_seconds,
+
+                    -- Mola = sum of all (Break Room GATE-K2-* IN -> OUT) durations
+                    COALESCE(SUM(next_ts - ts_utc) FILTER (
+                        WHERE zone = 'BREAK_ROOM' AND dir = 0 AND next_dir = 1
+                    ), 0) AS mola_seconds
+                FROM event_pairs
+                GROUP BY employee_id, working_date
+            )
             SELECT 
                 e.id AS employee_id,
-                e.ad_soyad, 
+                e.ad_soyad,
                 e.departman,
-                TO_CHAR(TO_TIMESTAMP(a.ts_utc) AT TIME ZONE $3, 'YYYY-MM-DD') as working_date,
-                MIN(a.ts_utc) FILTER (WHERE a.dir = 0 AND a.result = 0) as first_in,
-                MAX(a.ts_utc) FILTER (WHERE a.dir = 1) as last_out,
-                CASE
-                    WHEN MIN(a.ts_utc) FILTER (WHERE a.dir = 0 AND a.result = 0) IS NOT NULL
-                     AND MAX(a.ts_utc) FILTER (WHERE a.dir = 1) IS NOT NULL
-                     AND MAX(a.ts_utc) FILTER (WHERE a.dir = 1) > MIN(a.ts_utc) FILTER (WHERE a.dir = 0 AND a.result = 0)
-                    THEN MAX(a.ts_utc) FILTER (WHERE a.dir = 1) - MIN(a.ts_utc) FILTER (WHERE a.dir = 0 AND a.result = 0)
-                    ELSE NULL
-                END as duration_seconds
-            FROM access_events a
-            JOIN employees e ON a.employee_id = e.id
-            WHERE a.ts_utc >= $1 AND a.ts_utc <= $2
-              AND ($4::int IS NULL OR a.employee_id = $4::int)
-            GROUP BY e.id, e.ad_soyad, e.departman, working_date
-            ORDER BY working_date DESC, e.ad_soyad ASC
+                z.working_date,
+                z.first_in_main,
+                z.last_out_main,
+                z.total_work_seconds,
+                z.yemek_molasi_seconds,
+                z.mola_seconds
+            FROM daily_zone_totals z
+            JOIN employees e ON z.employee_id = e.id
+            ORDER BY z.working_date DESC, e.ad_soyad ASC;
         `;
-        // Entries are still restricted to result=0 (granted) inside the FILTER
-        // clauses above - a denied scan shouldn't count as clocking in - but
-        // exits are no longer filtered by result at all, since the exit button
-        // never checks the ACL and always logs result=manual, never granted.
-        // The old blanket "AND a.result = 0" in the WHERE clause excluded every
-        // exit row before aggregation even ran, so MAX(ts_utc) was silently
-        // computed over entries only - "last exit" was really "latest entry",
-        // collapsing duration to 0 whenever there was only one entry that day.
+
         const result = await pool.query(query, [start_ts, end_ts, REPORT_TZ, employeeIdFilter]);
 
         // Handle CSV Export
         if (format === 'csv') {
-            const header = 'Name,Department,Date,First In,Last Out,Duration (Seconds)\n';
+            const header = 'Personel No,Ad Soyad,Departman,Tarih,İlk Giriş,Son Çıkış,Toplam Çalışma Süresi,Yemek Molası,Mola\n';
             const rows = result.rows.map(r => 
-                [r.ad_soyad, r.departman, r.working_date, r.first_in, r.last_out, r.duration_seconds]
+                [
+                    r.employee_id,
+                    r.ad_soyad,
+                    r.departman,
+                    r.working_date,
+                    r.first_in_main ? new Date(r.first_in_main * 1000).toISOString().substring(11, 19) : '',
+                    r.last_out_main ? new Date(r.last_out_main * 1000).toISOString().substring(11, 19) : '',
+                    formatDuration(r.total_work_seconds),
+                    formatDuration(r.yemek_molasi_seconds),
+                    formatDuration(r.mola_seconds)
+                ]
                     .map(csvField)
                     .join(',')
             ).join('\n');
             
             res.header('Content-Type', 'text/csv; charset=utf-8');
-            res.attachment('pdks_report.csv');
+            res.attachment('pdks_raporu.csv');
             return res.send(header + rows);
         }
 

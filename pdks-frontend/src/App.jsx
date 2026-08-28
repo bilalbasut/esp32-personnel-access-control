@@ -6,6 +6,7 @@ import Employees from './pages/Employees';
 import Cards from './pages/Cards';
 import Reports from './pages/Reports';
 import Firmware from './pages/Firmware';
+import AuditLog from './pages/AuditLog';
 
 // Adding a future page (e.g. "who's missing today", "employee summary"):
 // 1. Create src/pages/WhateverPage.jsx
@@ -23,6 +24,7 @@ function App() {
           <Route path="cards" element={<Cards />} />
           <Route path="reports" element={<Reports />} />
           <Route path="firmware" element={<Firmware />} />
+          <Route path="audit" element={<AuditLog />} />
         </Route>
       </Routes>
     </BrowserRouter>
