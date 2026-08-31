@@ -1,0 +1,139 @@
+"""
+Binary ACL publisher - direct port of publishAclUpdate() in the original
+server.js.
+
+Wire Format:
+  Header (8 bytes):
+    - ver:        uint32 LE (4 bytes)
+    - card_count: uint32 LE (4 bytes)
+  Records (20 bytes each):
+    - uid:          7 bytes (raw hex bytes, padded with 0x00)
+    - uidLen:       uint8   (1 byte)
+    - floor_mask:   uint32 LE (4 bytes)
+    - valid_to:     uint32 LE (4 bytes)
+    - win_start_m:  uint16 LE (2 bytes)
+    - win_end_m:    uint16 LE (2 bytes)
+"""
+import struct
+
+import paho.mqtt.publish as mqtt_publish
+from django.conf import settings
+from django.db import connection
+
+from core.models import Card
+
+HEADER_SIZE = 8
+RECORD_SIZE = 20
+
+
+def parse_floors(raw):
+    """Mirrors server.js parseFloors(): normalize '1,3' / [1,3] into ints."""
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        out = []
+        for v in raw:
+            try:
+                out.append(int(v))
+            except (TypeError, ValueError):
+                pass
+        return out
+    if isinstance(raw, str):
+        out = []
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                out.append(int(part))
+            except ValueError:
+                pass
+        return out
+    return []
+
+
+def _next_acl_version():
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT nextval('acl_version_seq')")
+        return cursor.fetchone()[0]
+
+
+def build_acl_buffer(cards, version):
+    card_count = len(cards)
+    buf = bytearray(HEADER_SIZE + card_count * RECORD_SIZE)
+
+    struct.pack_into("<II", buf, 0, version, card_count)
+
+    offset = HEADER_SIZE
+    for card in cards:
+        normalized_uid = str(card.uid).strip().upper()
+        try:
+            uid_bytes = bytes.fromhex(normalized_uid)
+        except ValueError:
+            uid_bytes = b""
+        uid_len = min(len(uid_bytes), 7)
+
+        buf[offset:offset + uid_len] = uid_bytes[:uid_len]
+        # remaining bytes up to 7 are already zero from bytearray init
+        offset += 7
+
+        struct.pack_into("<B", buf, offset, uid_len)
+        offset += 1
+
+        floor_mask = 0
+        for f in parse_floors(card.floors):
+            if 0 <= f < 32:
+                floor_mask |= (1 << f)
+        struct.pack_into("<I", buf, offset, floor_mask & 0xFFFFFFFF)
+        offset += 4
+
+        valid_to = int(card.valid_to) if card.valid_to is not None else 0xFFFFFFFF
+        struct.pack_into("<I", buf, offset, valid_to & 0xFFFFFFFF)
+        offset += 4
+
+        local_start_m = card.win_start_m if card.win_start_m is not None else 0
+        local_end_m = card.win_end_m if card.win_end_m is not None else 1440
+
+        utc_start_m = local_start_m
+        utc_end_m = local_end_m
+
+        # Only convert if not full-day access (0 to 1440), same as server.js.
+        if not (local_start_m == 0 and local_end_m == 1440):
+            tz_offset_minutes = settings.TZ_OFFSET_MINUTES  # Turkey = +180 mins
+
+            utc_start_m = (local_start_m - tz_offset_minutes) % 1440
+            if utc_start_m < 0:
+                utc_start_m += 1440
+
+            utc_end_m = (local_end_m - tz_offset_minutes) % 1440
+            if utc_end_m < 0:
+                utc_end_m += 1440
+
+        struct.pack_into("<H", buf, offset, utc_start_m)
+        offset += 2
+        struct.pack_into("<H", buf, offset, utc_end_m)
+        offset += 2
+
+    return bytes(buf)
+
+
+def publish_acl_update():
+    """Rebuilds the binary ACL from active cards and publishes it retained
+    to pdks/merkez/cfg/acl, exactly like server.js's publishAclUpdate()."""
+    cards = list(
+        Card.objects.filter(aktif=1).values_list(
+            "uid", "floors", "valid_to", "win_start_m", "win_end_m", named=True
+        )
+    )
+    version = _next_acl_version()
+    buf = build_acl_buffer(cards, version)
+
+    mqtt_publish.single(
+        "pdks/merkez/cfg/acl",
+        payload=buf,
+        qos=1,
+        retain=True,
+        hostname=settings.MQTT_HOST,
+        port=settings.MQTT_PORT,
+    )
+    return version, len(cards), len(buf)
