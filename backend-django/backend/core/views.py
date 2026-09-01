@@ -89,25 +89,42 @@ def _floors_to_store(floors):
 # --- GET: Live Feed of Door Scans ---
 @require_http_methods(["GET"])
 def events_list(request):
-    events = list(AccessEvent.objects.order_by("-id")[:50].values())
+    try:
+        since_id = request.GET.get("since_id")
 
-    # Mirrors the original's LIVE join (access_events.uid -> cards.uid ->
-    # employees), not a snapshot of access_events.employee_id - that field is
-    # only ever set once at insert time by the collector, so if a card gets
-    # reassigned to a different employee later, historical events should
-    # still show whoever currently holds the card, matching prior behavior.
-    uids = {e["uid"] for e in events if e["uid"]}
-    card_to_employee = dict(Card.objects.filter(uid__in=uids).values_list("uid", "employee_id"))
-    employee_ids = {eid for eid in card_to_employee.values() if eid is not None}
-    employees = {
-        emp["id"]: emp
-        for emp in Employee.objects.filter(id__in=employee_ids).values("id", "ad_soyad", "departman")
-    }
-    for e in events:
-        emp = employees.get(card_to_employee.get(e["uid"]))
-        e["ad_soyad"] = emp["ad_soyad"] if emp else None
-        e["departman"] = emp["departman"] if emp else None
-    return JsonResponse(events, safe=False)
+        if since_id and since_id.isdigit():
+            # Delta fetch: newly arrived events ordered ascending
+            events = list(AccessEvent.objects.filter(id__gt=int(since_id)).order_by("id")[:50])
+        else:
+            # Initial snapshot: newest 50 events
+            events = list(AccessEvent.objects.order_by("-id")[:50])
+
+        # Batch lookup employee names for all IDs in the event list
+        emp_ids = {ev.employee_id for ev in events if ev.employee_id}
+        emp_map = (
+            {emp.id: emp.ad_soyad for emp in Employee.objects.filter(id__in=emp_ids)}
+            if emp_ids
+            else {}
+        )
+
+        data = [
+            {
+                "id": ev.id,
+                "device_id": ev.device_id,
+                "uid": ev.uid,
+                "employee_id": ev.employee_id,
+                "ad_soyad": emp_map.get(ev.employee_id),
+                "ts_utc": ev.ts_utc,
+                "ts_source": getattr(ev, "ts_source", 0),
+                "dir": ev.dir,
+                "result": ev.result,
+                "mode": ev.mode,
+            }
+            for ev in events
+        ]
+        return JsonResponse(data, safe=False)
+    except Exception as err:
+        return JsonResponse({"error": f"Failed to fetch events: {err}"}, status=500)
 
 
 # --- GET: Device Fleet Status ---

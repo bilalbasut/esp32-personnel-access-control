@@ -23,10 +23,13 @@ async function request(endpoint, options = {}) {
 
 export const api = {
   // Live Feed & Fleet
-  getEvents: () => request('/api/events'),
+  getEvents: (params = {}) => {
+    const q = new URLSearchParams(params).toString();
+    return request(q ? `/api/events?${q}` : '/api/events');
+  },
   getDevices: () => request('/api/devices'),
   getDashboardKpis: () => request('/api/dashboard/kpis'),
-  
+
   // Employees
   getEmployees: () => request('/api/employees'),
   addEmployee: (payload) => request('/api/employees', { method: 'POST', body: payload }),

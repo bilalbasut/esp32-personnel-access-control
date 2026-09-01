@@ -4,30 +4,61 @@ import { api } from '../api';
 import { usePolling } from '../composables/usePolling';
 import { formatDateTime, formatDirection, isDeviceOnline, resultLabel } from '../utils/format';
 
-// Single polling bundle: Live events, device heartbeats, and database count KPIs
-const { data, error: primaryErr } = usePolling(
+// 1. Poll Devices and Database KPIs normally every 3s
+const { data: telemetry, error: telemetryErr } = usePolling(
   () => Promise.all([
-    api.getEvents(),
     api.getDevices(),
     api.getDashboardKpis()
-  ]).then(([events, devices, kpis]) => ({ events, devices, kpis })),
+  ]).then(([devices, kpis]) => ({ devices, kpis })),
   3000
 );
 
+// 2. Stateful Event Delta Tracker
+const events = ref([]);
+const latestId = ref(null);
+const eventsErr = ref(null);
+
 const currentTime = ref(Date.now());
-let timer = null;
+let eventTimer = null;
+let clockTimer = null;
+
+const pollEventDelta = async () => {
+  try {
+    const params = latestId.value ? { since_id: latestId.value } : {};
+    const res = await api.getEvents(params);
+
+    if (!latestId.value) {
+      // First load: snapshot of latest 50 events (ordered DESC)
+      events.value = res || [];
+      if (events.value.length > 0) {
+        latestId.value = events.value[0].id;
+      }
+    } else if (res && res.length > 0) {
+      // Delta batch received (ordered ASC: oldest -> newest in batch)
+      latestId.value = res[res.length - 1].id;
+      events.value = [...res.slice().reverse(), ...events.value].slice(0, 50);
+    }
+    eventsErr.value = null;
+  } catch (err) {
+    eventsErr.value = err.message || 'Failed to stream live events';
+  }
+};
 
 onMounted(() => {
-  timer = setInterval(() => { currentTime.value = Date.now(); }, 3000);
+  pollEventDelta();
+  eventTimer = setInterval(pollEventDelta, 3000);
+  clockTimer = setInterval(() => { currentTime.value = Date.now(); }, 3000);
 });
 
 onUnmounted(() => {
-  if (timer) clearInterval(timer);
+  if (eventTimer) clearInterval(eventTimer);
+  if (clockTimer) clearInterval(clockTimer);
 });
 
-const events = computed(() => data.value.events || []);
-const devices = computed(() => data.value.devices || []);
-const kpis = computed(() => data.value.kpis || {});
+// Computed properties for template binding
+const devices = computed(() => telemetry.value.devices || []);
+const kpis = computed(() => telemetry.value.kpis || {});
+const error = computed(() => telemetryErr.value || eventsErr.value);
 
 const nowSec = computed(() => Math.floor(currentTime.value / 1000));
 const onlineCount = computed(() => devices.value.filter((d) => isDeviceOnline(d, nowSec.value)).length);
