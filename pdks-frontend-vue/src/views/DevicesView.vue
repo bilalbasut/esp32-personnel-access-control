@@ -91,7 +91,7 @@ const triggerOtaUpdate = async (devId) => {
               <td>{{ dev.queue_depth ?? 0 }}</td>
               <td>
                 <div class="btn-group btn-group-sm">
-                  <button class="btn btn-outline-primary" @click="sendCommand(dev.id, 'open')">Release</button>
+                  <button class="btn btn-outline-primary" @click="sendCommand(dev.id, 'open')">Open Gate</button>
                   <button class="btn btn-outline-secondary" @click="sendCommand(dev.id, 'sync')">Sync</button>
                   <button class="btn btn-outline-danger" @click="sendCommand(dev.id, 'reboot')">Reboot</button>
                 </div>

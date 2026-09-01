@@ -1,12 +1,17 @@
 <script setup>
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import { api } from '../api';
 import { usePolling } from '../composables/usePolling';
+import { usePagination } from '../composables/usePagination';
+import PaginationBar from '../components/PaginationBar.vue';
 
 const { data, error, refresh } = usePolling(
   () => Promise.all([api.getEmployees(), api.getCards()]).then(([employees, cards]) => ({ employees, cards })),
   5000
 );
+
+const employeesList = computed(() => data.value.employees || []);
+const { page, totalPages, pageItems: pagedEmployees, next, prev } = usePagination(employeesList, 10);
 
 const addForm = ref({ ad_soyad: '', departman: '' });
 const onboardForm = ref({ ad_soyad: '', departman: '', uid: '', floors: '1,2,3', win_start_m: 0, win_end_m: 1440 });
@@ -125,7 +130,7 @@ const handleLink = async (emp, uid) => {
     <!-- Employee Table -->
     <div class="card shadow-sm">
       <div class="card-header bg-white py-3">
-        <h6 class="m-0 fw-bold">Active Employees ({{ (data.employees || []).length }})</h6>
+        <h6 class="m-0 fw-bold">Active Employees ({{ employeesList.length }})</h6>
       </div>
       <div class="table-responsive">
         <table class="table table-hover align-middle mb-0">
@@ -139,7 +144,7 @@ const handleLink = async (emp, uid) => {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="emp in data.employees || []" :key="emp.id">
+            <tr v-for="emp in pagedEmployees" :key="emp.id">
               <td>#{{ emp.id }}</td>
               <td class="fw-semibold">{{ emp.ad_soyad }}</td>
               <td>{{ emp.departman || '—' }}</td>
@@ -162,6 +167,7 @@ const handleLink = async (emp, uid) => {
           </tbody>
         </table>
       </div>
+      <PaginationBar :page="page" :total-pages="totalPages" :total="employeesList.length" :page-size="10" @prev="prev" @next="next" />
     </div>
   </div>
 </template>

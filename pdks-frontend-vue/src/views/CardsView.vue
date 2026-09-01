@@ -1,13 +1,18 @@
 <script setup>
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import { api } from '../api';
 import { usePolling } from '../composables/usePolling';
+import { usePagination } from '../composables/usePagination';
+import PaginationBar from '../components/PaginationBar.vue';
 import { formatDateTime, minutesToHHMM, hhmmToMinutes } from '../utils/format';
 
 const { data, error, refresh } = usePolling(
   () => Promise.all([api.getCards(), api.getEmployees()]).then(([cards, employees]) => ({ cards, employees })),
   5000
 );
+
+const cardsList = computed(() => data.value.cards || []);
+const { page, totalPages, pageItems: pagedCards, next, prev } = usePagination(cardsList, 10);
 
 const newCard = ref({ uid: '', employee_id: '', floors: '1,2,3', win_start: '00:00', win_end: '23:59' });
 const feedback = ref(null);
@@ -115,7 +120,7 @@ const handleDelete = async (uid) => {
     <!-- Card Table -->
     <div class="card shadow-sm">
       <div class="card-header bg-white py-3">
-        <h6 class="m-0 fw-bold">Registered Cards ({{ (data.cards || []).length }})</h6>
+        <h6 class="m-0 fw-bold">Registered Cards ({{ cardsList.length }})</h6>
       </div>
       <div class="table-responsive">
         <table class="table table-hover align-middle mb-0">
@@ -131,7 +136,7 @@ const handleDelete = async (uid) => {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="card in data.cards || []" :key="card.uid">
+            <tr v-for="card in pagedCards" :key="card.uid">
               <td><code class="fw-bold text-dark fs-6">{{ card.uid }}</code></td>
               <td>{{ card.ad_soyad || 'Unassigned' }}</td>
               <td><span class="badge bg-light text-dark border">{{ card.floors || 'None' }}</span></td>
@@ -153,6 +158,7 @@ const handleDelete = async (uid) => {
           </tbody>
         </table>
       </div>
+      <PaginationBar :page="page" :total-pages="totalPages" :total="cardsList.length" :page-size="10" @prev="prev" @next="next" />
     </div>
   </div>
 </template>

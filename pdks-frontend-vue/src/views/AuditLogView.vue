@@ -4,12 +4,11 @@ import { api } from '../api';
 import { usePolling } from '../composables/usePolling';
 import { formatDateTime, resultLabel } from '../utils/format';
 
-const { data: events, error, refresh } = usePolling(() => api.getEvents(), 5000);
+const { data: events, error, refresh } = usePolling(() => api.getEvents(), 5000, []);
 const filterType = ref('all');
 
 const auditEvents = computed(() => {
-  const evList = events.value || [];
-  return evList.filter((ev) => {
+  return events.value.filter((ev) => {
     const isDenied = ev.result !== 0 && ev.result !== 4;
     const isSuspectTime = ev.ts_source === 2;
     if (filterType.value === 'denied') return isDenied;

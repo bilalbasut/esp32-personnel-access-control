@@ -1,7 +1,7 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 
-export function usePolling(fetchFn, intervalMs = 5000) {
-  const data = ref({});
+export function usePolling(fetchFn, intervalMs = 5000, initialValue = {}) {
+  const data = ref(initialValue);
   const error = ref(null);
   const loading = ref(true);
   let timer = null;

@@ -4,7 +4,7 @@ import { api } from '../api';
 import { usePolling } from '../composables/usePolling';
 import { formatDateTime, formatBytes } from '../utils/format';
 
-const { data: firmwareList, error, refresh } = usePolling(() => api.getFirmware(), 10000);
+const { data: firmwareList, error, refresh } = usePolling(() => api.getFirmware(), 10000, []);
 
 const version = ref('');
 const file = ref(null);
@@ -68,7 +68,7 @@ const handleUpload = async () => {
     <!-- Binaries Table -->
     <div class="card shadow-sm">
       <div class="card-header bg-white py-3">
-        <h6 class="m-0 fw-bold">Available Release Images ({{ (firmwareList || []).length }})</h6>
+        <h6 class="m-0 fw-bold">Available Release Images ({{ firmwareList.length }})</h6>
       </div>
       <div class="table-responsive">
         <table class="table table-hover align-middle mb-0">
@@ -82,7 +82,7 @@ const handleUpload = async () => {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="fw in firmwareList || []" :key="fw.version">
+            <tr v-for="fw in firmwareList" :key="fw.version">
               <td><span class="badge bg-dark fs-6">{{ fw.version }}</span></td>
               <td>{{ fw.filename }}</td>
               <td>{{ formatBytes(fw.size) }}</td>
