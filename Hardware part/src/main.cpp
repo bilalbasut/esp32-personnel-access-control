@@ -8,7 +8,7 @@
 #include "storage/event_queue.h"
 #include "domain/acl_engine.h"
 #include "network/network_manager.h"
-#include "ota_guard.h"
+#include "network/ota_guard.h"
 
 TaskHandle_t NetworkTask = nullptr;
 
