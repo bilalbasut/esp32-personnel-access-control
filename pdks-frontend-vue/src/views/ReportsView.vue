@@ -23,7 +23,12 @@ onMounted(async () => {
 const getEpochRange = () => {
   const start = Math.floor(new Date(`${startDate.value}T00:00:00+03:00`).getTime() / 1000);
   const end = Math.floor(new Date(`${endDate.value}T23:59:59+03:00`).getTime() / 1000);
-  return { start_ts: start, end_ts: end, employee_id: employeeId.value || undefined };
+
+  const params = { start_ts: start, end_ts: end };
+  if (employeeId.value) {
+    params.employee_id = employeeId.value;
+  }
+  return params;
 };
 
 const runReport = async () => {
