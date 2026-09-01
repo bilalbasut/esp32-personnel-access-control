@@ -1,0 +1,214 @@
+import os
+import time
+import hashlib
+from datetime import datetime, timezone
+
+from django.conf import settings
+from django.db import connection
+from django.http import HttpResponse
+
+from rest_framework import viewsets, status, mixins
+from rest_framework.views import APIView
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework.parsers import MultiPartParser, FormParser
+
+from core.models import AccessEvent, Firmware
+from core.serializers import (
+    AccessEventSerializer,
+    FirmwareSerializer,
+    FirmwareUploadSerializer
+)
+
+
+class EventViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Replaces GET /api/events with a read-only ViewSet.
+    Maintains the 50 most recent events hydrated with employee info.
+    """
+    serializer_class = AccessEventSerializer
+
+    def get_queryset(self):
+        sql = """
+            SELECT a.*, e.ad_soyad, e.departman
+            FROM access_events a
+            LEFT JOIN cards c ON a.uid = c.uid
+            LEFT JOIN employees e ON c.employee_id = e.id
+            ORDER BY a.id DESC LIMIT 50
+        """
+        return AccessEvent.objects.raw(sql)
+
+
+class FirmwareViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+    """
+    Replaces GET /api/firmware and POST /api/firmware/upload.
+    """
+    queryset = Firmware.objects.all().order_by("-uploaded_at")
+    serializer_class = FirmwareSerializer
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="upload",
+        parser_classes=[MultiPartParser, FormParser]
+    )
+    def upload_binary(self, request):
+        serializer = FirmwareUploadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        version = serializer.validated_data["version"]
+        uploaded_file = serializer.validated_data["file"]
+
+        if not uploaded_file.name.endswith(".bin"):
+            return Response(
+                {"error": "Only .bin firmware binaries are supported."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        content = uploaded_file.read()
+        md5_hash = hashlib.md5(content).hexdigest()
+        filename = f"firmware_{version}.bin"
+        file_path = os.path.join(settings.FIRMWARE_DIR, filename)
+
+        with open(file_path, "wb") as destination:
+            destination.write(content)
+
+        firmware, _ = Firmware.objects.update_or_create(
+            version=version,
+            defaults={
+                "filename": filename,
+                "md5": md5_hash,
+                "size": len(content),
+                "uploaded_at": int(time.time()),
+            }
+        )
+
+        return Response(
+            FirmwareSerializer(firmware).data,
+            status=status.HTTP_201_CREATED
+        )
+
+
+class PdksReportView(APIView):
+    """
+    Replaces GET /api/reports/pdks.
+    Generates daily first-in/last-out aggregates and computes zone time.
+    """
+    def get(self, request):
+        start_ts = request.query_params.get("start_ts")
+        end_ts = request.query_params.get("end_ts")
+        fmt = request.query_params.get("format")
+        employee_id = request.query_params.get("employee_id")
+
+        if not start_ts or not end_ts:
+            return Response(
+                {"error": "start_ts and end_ts (Unix timestamps) are required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        emp_filter = None
+        if employee_id not in (None, ""):
+            try:
+                emp_filter = int(employee_id)
+            except ValueError:
+                return Response(
+                    {"error": "employee_id must be an integer."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        sql = """
+        WITH tagged_events AS (
+            SELECT
+                a.employee_id,
+                CASE
+                    WHEN a.device_id LIKE 'GATE-K3-%' THEN 'MAIN'
+                    WHEN a.device_id LIKE 'GATE-K2-%' THEN 'BREAK_ROOM'
+                    WHEN a.device_id LIKE 'GATE-K1-%' THEN 'MESS_HALL'
+                    ELSE 'MAIN'
+                END AS zone,
+                TO_CHAR(TO_TIMESTAMP(a.ts_utc) AT TIME ZONE %s, 'YYYY-MM-DD') AS working_date,
+                a.ts_utc,
+                a.dir,
+                a.result
+            FROM access_events a
+            WHERE a.ts_utc >= %s AND a.ts_utc <= %s
+              AND a.result IN (0, 4)
+              AND (%s::int IS NULL OR a.employee_id = %s::int)
+        ),
+        event_pairs AS (
+            SELECT
+                employee_id, zone, working_date, ts_utc, dir,
+                LEAD(ts_utc) OVER (PARTITION BY employee_id, zone, working_date ORDER BY ts_utc) AS next_ts,
+                LEAD(dir) OVER (PARTITION BY employee_id, zone, working_date ORDER BY ts_utc) AS next_dir
+            FROM tagged_events
+        ),
+        daily_zone_totals AS (
+            SELECT
+                employee_id,
+                working_date,
+                MIN(ts_utc) FILTER (WHERE zone = 'MAIN' AND dir = 0) AS first_in_main,
+                MAX(ts_utc) FILTER (WHERE zone = 'MAIN' AND dir = 1) AS last_out_main,
+                COALESCE(SUM(next_ts - ts_utc) FILTER (
+                    WHERE zone = 'MAIN' AND dir = 0 AND next_dir = 1
+                ), 0) AS total_work_seconds,
+                COALESCE(SUM(next_ts - ts_utc) FILTER (
+                    WHERE zone = 'MESS_HALL' AND dir = 0 AND next_dir = 1
+                ), 0) AS yemek_molasi_seconds,
+                COALESCE(SUM(next_ts - ts_utc) FILTER (
+                    WHERE zone = 'BREAK_ROOM' AND dir = 0 AND next_dir = 1
+                ), 0) AS mola_seconds
+            FROM event_pairs
+            GROUP BY employee_id, working_date
+        )
+        SELECT
+            e.id AS employee_id, e.ad_soyad, e.departman, z.working_date,
+            z.first_in_main, z.last_out_main, z.total_work_seconds,
+            z.yemek_molasi_seconds, z.mola_seconds
+        FROM daily_zone_totals z
+        JOIN employees e ON z.employee_id = e.id
+        ORDER BY z.working_date DESC, e.ad_soyad ASC;
+        """
+
+        report_tz = getattr(settings, "REPORT_TZ", "Europe/Istanbul")
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(sql, [report_tz, start_ts, end_ts, emp_filter, emp_filter])
+                cols = [c[0] for c in cursor.description]
+                rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
+        except Exception as err:
+            return Response({"error": str(err)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        if fmt == "csv":
+            return self._generate_csv(rows)
+
+        return Response(rows)
+
+    def _generate_csv(self, rows):
+        def format_dur(sec):
+            if not sec or sec < 0:
+                return "00:00:00"
+            h, rem = divmod(int(sec), 3600)
+            m, s = divmod(rem, 60)
+            return f"{h:02d}:{m:02d}:{s:02d}"
+
+        def csv_escape(v):
+            return f'"{str(v).replace('"', '""')}"' if v is not None else '""'
+
+        header = "Personel No,Ad Soyad,Departman,Tarih,İlk Giriş,Son Çıkış,Toplam Çalışma Süresi,Yemek Molası,Mola\n"
+        lines = []
+        for r in rows:
+            fin = datetime.fromtimestamp(r["first_in_main"], tz=timezone.utc).strftime("%H:%M:%S") if r["first_in_main"] else ""
+            lout = datetime.fromtimestamp(r["last_out_main"], tz=timezone.utc).strftime("%H:%M:%S") if r["last_out_main"] else ""
+            fields = [
+                r["employee_id"], r["ad_soyad"], r["departman"], r["working_date"],
+                fin, lout,
+                format_dur(r["total_work_seconds"]),
+                format_dur(r["yemek_molasi_seconds"]),
+                format_dur(r["mola_seconds"])
+            ]
+            lines.append(",".join(csv_escape(f) for f in fields))
+
+        csv_content = header + "\n".join(lines)
+        res = HttpResponse(csv_content, content_type="text/csv; charset=utf-8")
+        res["Content-Disposition"] = 'attachment; filename="pdks_raporu.csv"'
+        return res
