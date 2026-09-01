@@ -1,0 +1,112 @@
+# ============================================================
+# OS & Editor Files
+# ============================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDEs & Editors
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# ============================================================
+# Environment Variables & Secrets
+# ============================================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ============================================================
+# Python & Django Backend
+# ============================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Django media & static output
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+
+# Logs
+*.log
+
+# ============================================================
+# Node.js & Vue 3 Frontend (Vite)
+# ============================================================
+node_modules/
+dist/
+dist-ssr/
+coverage/
+*.local
+
+# npm / yarn / pnpm logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ============================================================
+# PlatformIO & ESP32 Firmware
+# ============================================================
+.pio/
+.pioenvs/
+.piolibdeps/
+.clangd/
+compile_commands.json
+
+# Binary firmware uploads & flash dumps
+firmware_files/*.bin
+*.bin
+*.elf
+*.hex
+
+# ============================================================
+# Docker & Local Volumes
+# ============================================================
+pgdata/
+pg_data/
+mosquitto_data/
+mosquitto_log/
