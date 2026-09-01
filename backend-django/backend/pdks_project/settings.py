@@ -2,12 +2,14 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Load environment variables from .env (checks backend dir, then project root)
-load_dotenv(BASE_DIR / '.env')
-load_dotenv(BASE_DIR.parent / '.env')
+# Docker Compose loads .env automatically via env_file: for containers, but
+# that mechanism doesn't exist for a bare `python manage.py runserver` on
+# the host - without this, every os.environ.get() below silently falls back
+# to its hardcoded default instead of raising, which is how a local run
+# quietly ended up pointed at the wrong Postgres instance/port.
+load_dotenv(BASE_DIR.parent / ".env")
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "change-me-in-production")
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
