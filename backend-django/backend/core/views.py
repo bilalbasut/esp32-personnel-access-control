@@ -5,6 +5,7 @@ import os
 import re
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.db import IntegrityError, connection, transaction
@@ -592,3 +593,23 @@ def devices_ota(request, device_id):
         return JsonResponse({"error": f"Failed to send OTA command: {err}"}, status=500)
 
     return JsonResponse({"message": f"OTA to version {version} queued for device {device_id}.", "url": url})
+
+@require_http_methods(["GET"])
+def dashboard_kpis(request):
+    try:
+        # Calculate midnight for Turkey local time (Europe/Istanbul)
+        today_start = datetime.now(ZoneInfo("Europe/Istanbul")).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        today_start_epoch = int(today_start.timestamp())
+
+        return JsonResponse(
+            {
+                "total_devices": Device.objects.count(),
+                "total_employees": Employee.objects.filter(aktif=1).count(),
+                "active_cards": Card.objects.filter(aktif=1).count(),
+                "scans_today": AccessEvent.objects.filter(ts_utc__gte=today_start_epoch).count(),
+            }
+        )
+    except Exception as err:
+        return JsonResponse({"error": f"Failed to compute KPIs: {err}"}, status=500)

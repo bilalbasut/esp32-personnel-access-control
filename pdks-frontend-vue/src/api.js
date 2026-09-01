@@ -25,7 +25,8 @@ export const api = {
   // Live Feed & Fleet
   getEvents: () => request('/api/events'),
   getDevices: () => request('/api/devices'),
-
+  getDashboardKpis: () => request('/api/dashboard/kpis'),
+  
   // Employees
   getEmployees: () => request('/api/employees'),
   addEmployee: (payload) => request('/api/employees', { method: 'POST', body: payload }),

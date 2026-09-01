@@ -68,11 +68,11 @@ const triggerOtaUpdate = async (devId) => {
           <thead class="table-light">
             <tr>
               <th>Controller ID</th>
+              <th>Device Name</th>
               <th>Status</th>
               <th>Last Heartbeat</th>
               <th>Firmware</th>
               <th>Heap Free</th>
-              <th>Queue Depth</th>
               <th>Remote Trigger</th>
               <th>Firmware Push (OTA)</th>
             </tr>
@@ -80,6 +80,7 @@ const triggerOtaUpdate = async (devId) => {
           <tbody>
             <tr v-for="dev in data.devices || []" :key="dev.id">
               <td class="font-monospace fw-bold">{{ dev.id }}</td>
+              <td class="fw-semibold text-dark">{{ dev.ad || '—' }}</td>
               <td>
                 <span class="badge" :class="isDeviceOnline(dev, nowSec) ? 'bg-success' : 'bg-danger'">
                   {{ isDeviceOnline(dev, nowSec) ? 'Online' : 'Offline' }}
@@ -88,7 +89,6 @@ const triggerOtaUpdate = async (devId) => {
               <td class="small text-muted">{{ formatDateTime(dev.son_gorulme) }}</td>
               <td><span class="badge bg-light text-dark border">{{ dev.fw || '1.0.0' }}</span></td>
               <td class="small">{{ formatBytes(dev.heap_free) }}</td>
-              <td>{{ dev.queue_depth ?? 0 }}</td>
               <td>
                 <div class="btn-group btn-group-sm">
                   <button class="btn btn-outline-primary" @click="sendCommand(dev.id, 'open')">Open Gate</button>

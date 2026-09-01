@@ -7,7 +7,7 @@ import PaginationBar from '../components/PaginationBar.vue';
 
 const { data, error, refresh } = usePolling(
   () => Promise.all([api.getEmployees(), api.getCards()]).then(([employees, cards]) => ({ employees, cards })),
-  5000
+  30000
 );
 
 const employeesList = computed(() => data.value.employees || []);

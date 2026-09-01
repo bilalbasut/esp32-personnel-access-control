@@ -16,4 +16,5 @@ urlpatterns = [
     path("devices/<str:device_id>/ota", views.devices_ota),
     path("firmware/upload", views.firmware_upload),
     path("firmware", views.firmware_list),
+    path("dashboard/kpis", views.dashboard_kpis),
 ]

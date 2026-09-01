@@ -4,14 +4,14 @@ import { api } from '../api';
 import { usePolling } from '../composables/usePolling';
 import { formatDateTime, formatDirection, isDeviceOnline, resultLabel } from '../utils/format';
 
-const { data: primaryData, error: primaryErr } = usePolling(
-  () => Promise.all([api.getEvents(), api.getDevices()]).then(([events, devices]) => ({ events, devices })),
+// Single polling bundle: Live events, device heartbeats, and database count KPIs
+const { data, error: primaryErr } = usePolling(
+  () => Promise.all([
+    api.getEvents(),
+    api.getDevices(),
+    api.getDashboardKpis()
+  ]).then(([events, devices, kpis]) => ({ events, devices, kpis })),
   3000
-);
-
-const { data: entityData } = usePolling(
-  () => Promise.all([api.getEmployees(), api.getCards()]).then(([employees, cards]) => ({ employees, cards })),
-  20000
 );
 
 const currentTime = ref(Date.now());
@@ -20,30 +20,24 @@ let timer = null;
 onMounted(() => {
   timer = setInterval(() => { currentTime.value = Date.now(); }, 3000);
 });
-onUnmounted(() => { if (timer) clearInterval(timer); });
 
-const events = computed(() => primaryData.value.events || []);
-const devices = computed(() => primaryData.value.devices || []);
-const employees = computed(() => entityData.value.employees || []);
-const cards = computed(() => entityData.value.cards || []);
+onUnmounted(() => {
+  if (timer) clearInterval(timer);
+});
+
+const events = computed(() => data.value.events || []);
+const devices = computed(() => data.value.devices || []);
+const kpis = computed(() => data.value.kpis || {});
 
 const nowSec = computed(() => Math.floor(currentTime.value / 1000));
 const onlineCount = computed(() => devices.value.filter((d) => isDeviceOnline(d, nowSec.value)).length);
-const activeCardCount = computed(() => cards.value.filter((c) => Number(c.aktif) === 1).length);
-
-const todayStartSec = computed(() => {
-  const t = new Date(currentTime.value);
-  t.setHours(0, 0, 0, 0);
-  return Math.floor(t.getTime() / 1000);
-});
-const eventsToday = computed(() => events.value.filter((e) => Number(e.ts_utc) >= todayStartSec.value).length);
 </script>
 
 <template>
   <div>
     <div class="mb-4">
       <h3 class="fw-bold mb-1">System Overview</h3>
-      <p class="text-muted small">Live access event ingestion and controller fleet metrics.</p>
+      <p class="text-muted small">Live access event ingestion and controller fleet metrics (UTC+3 Timezone).</p>
     </div>
 
     <div v-if="primaryErr" class="alert alert-danger">{{ primaryErr }}</div>
@@ -62,7 +56,7 @@ const eventsToday = computed(() => events.value.filter((e) => Number(e.ts_utc) >
         <div class="card shadow-sm h-100">
           <div class="card-body">
             <span class="text-secondary small fw-bold text-uppercase">Registered Staff</span>
-            <h2 class="mt-2 mb-0 fw-bold">{{ employees.length }}</h2>
+            <h2 class="mt-2 mb-0 fw-bold">{{ kpis.total_employees ?? 0 }}</h2>
           </div>
         </div>
       </div>
@@ -70,7 +64,7 @@ const eventsToday = computed(() => events.value.filter((e) => Number(e.ts_utc) >
         <div class="card shadow-sm h-100">
           <div class="card-body">
             <span class="text-secondary small fw-bold text-uppercase">Active ACL Cards</span>
-            <h2 class="mt-2 mb-0 fw-bold">{{ activeCardCount }} <span class="text-muted fs-6">/ {{ cards.length }}</span></h2>
+            <h2 class="mt-2 mb-0 fw-bold">{{ kpis.active_cards ?? 0 }}</h2>
           </div>
         </div>
       </div>
@@ -78,7 +72,7 @@ const eventsToday = computed(() => events.value.filter((e) => Number(e.ts_utc) >
         <div class="card shadow-sm h-100">
           <div class="card-body">
             <span class="text-secondary small fw-bold text-uppercase">Scans Today</span>
-            <h2 class="mt-2 mb-0 fw-bold">{{ eventsToday }}</h2>
+            <h2 class="mt-2 mb-0 fw-bold">{{ kpis.scans_today ?? 0 }}</h2>
           </div>
         </div>
       </div>
@@ -94,7 +88,7 @@ const eventsToday = computed(() => events.value.filter((e) => Number(e.ts_utc) >
         <table class="table table-hover align-middle mb-0">
           <thead class="table-light sticky-top">
             <tr>
-              <th>Timestamp (UTC)</th>
+              <th>Timestamp (UTC+3)</th>
               <th>Direction</th>
               <th>Gate Unit</th>
               <th>Employee Name</th>
