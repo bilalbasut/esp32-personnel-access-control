@@ -10,6 +10,7 @@
 #include "config.h"
 #include "types.h"
 #include "ota_updater.h"
+#include "ota_guard.h"
 #include "../hal/rtc_service.h"
 #include "../hal/io_controller.h"
 #include "../storage/event_queue.h"
@@ -266,6 +267,7 @@ void NetworkManager::taskLoop(void* parameter) {
                         mqtt.subscribe(TOPIC_EVENT_ACK, 1);
                         mqtt.subscribe(TOPIC_ACL, 1);
                         mqtt.subscribe(TOPIC_CMD, 1);
+                        OtaGuard::confirmHealth();
                     } else {
                         backoff = min(backoff * 2, 60000UL);
                         backoff += random(0, 1000);

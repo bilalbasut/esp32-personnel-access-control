@@ -8,6 +8,7 @@
 #include "storage/event_queue.h"
 #include "domain/acl_engine.h"
 #include "network/network_manager.h"
+#include "ota_guard.h"
 
 TaskHandle_t NetworkTask = nullptr;
 
@@ -16,6 +17,7 @@ TaskHandle_t NetworkTask = nullptr;
 // ============================================================
 void setup() {
     Serial.begin(115200);
+    OtaGuard::init(60000); // 60s rollback deadline
     delay(1000);
 
     Serial.printf("Reset reason: %d\n", esp_reset_reason());
@@ -34,6 +36,7 @@ void setup() {
 }
 
 void loop() {
+    OtaGuard::loop();
     esp_task_wdt_reset();
     IOController::update();
     IOController::handleExitButton();
