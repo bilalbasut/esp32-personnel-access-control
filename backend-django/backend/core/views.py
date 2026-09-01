@@ -88,18 +88,25 @@ def _floors_to_store(floors):
 # --- GET: Live Feed of Door Scans ---
 @require_http_methods(["GET"])
 def events_list(request):
-    sql = """
-        SELECT a.*, e.ad_soyad, e.departman
-        FROM access_events a
-        LEFT JOIN cards c ON a.uid = c.uid
-        LEFT JOIN employees e ON c.employee_id = e.id
-        ORDER BY a.id DESC LIMIT 50
-    """
-    with connection.cursor() as cursor:
-        cursor.execute(sql)
-        columns = [col[0] for col in cursor.description]
-        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
-    return JsonResponse(rows, safe=False)
+    events = list(AccessEvent.objects.order_by("-id")[:50].values())
+
+    # Mirrors the original's LIVE join (access_events.uid -> cards.uid ->
+    # employees), not a snapshot of access_events.employee_id - that field is
+    # only ever set once at insert time by the collector, so if a card gets
+    # reassigned to a different employee later, historical events should
+    # still show whoever currently holds the card, matching prior behavior.
+    uids = {e["uid"] for e in events if e["uid"]}
+    card_to_employee = dict(Card.objects.filter(uid__in=uids).values_list("uid", "employee_id"))
+    employee_ids = {eid for eid in card_to_employee.values() if eid is not None}
+    employees = {
+        emp["id"]: emp
+        for emp in Employee.objects.filter(id__in=employee_ids).values("id", "ad_soyad", "departman")
+    }
+    for e in events:
+        emp = employees.get(card_to_employee.get(e["uid"]))
+        e["ad_soyad"] = emp["ad_soyad"] if emp else None
+        e["departman"] = emp["departman"] if emp else None
+    return JsonResponse(events, safe=False)
 
 
 # --- GET: Device Fleet Status ---
@@ -120,17 +127,22 @@ def cards_collection(request):
 
 
 def cards_list(request):
-    sql = """
-        SELECT c.uid, c.floors, c.valid_from, c.valid_to, c.win_start_m, c.win_end_m, c.aktif,
-               e.id AS employee_id, e.ad_soyad, e.departman
-        FROM cards c
-        LEFT JOIN employees e ON c.employee_id = e.id
-        ORDER BY e.ad_soyad ASC
-    """
-    with connection.cursor() as cursor:
-        cursor.execute(sql)
-        columns = [col[0] for col in cursor.description]
-        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+    cards = Card.objects.select_related("employee").order_by("employee__ad_soyad")
+    rows = [
+        {
+            "uid": c.uid,
+            "floors": c.floors,
+            "valid_from": c.valid_from,
+            "valid_to": c.valid_to,
+            "win_start_m": c.win_start_m,
+            "win_end_m": c.win_end_m,
+            "aktif": c.aktif,
+            "employee_id": c.employee_id,
+            "ad_soyad": c.employee.ad_soyad if c.employee_id else None,
+            "departman": c.employee.departman if c.employee_id else None,
+        }
+        for c in cards
+    ]
     return JsonResponse(rows, safe=False)
 
 
@@ -144,16 +156,15 @@ def employees_collection(request):
 
 
 def employees_list(request):
-    sql = """
-        SELECT e.id, e.ad_soyad, e.departman, e.aktif, c.uid AS card_uid
-        FROM employees e
-        LEFT JOIN cards c ON c.employee_id = e.id
-        ORDER BY e.ad_soyad ASC
-    """
-    with connection.cursor() as cursor:
-        cursor.execute(sql)
-        columns = [col[0] for col in cursor.description]
-        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+    employees = Employee.objects.prefetch_related("cards").order_by("ad_soyad")
+    rows = []
+    for emp in employees:
+        cards = list(emp.cards.all())
+        base = {"id": emp.id, "ad_soyad": emp.ad_soyad, "departman": emp.departman, "aktif": emp.aktif}
+        if cards:
+            rows.extend({**base, "card_uid": c.uid} for c in cards)
+        else:
+            rows.append({**base, "card_uid": None})
     return JsonResponse(rows, safe=False)
 
 

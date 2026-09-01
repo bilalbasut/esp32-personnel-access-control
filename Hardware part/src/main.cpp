@@ -23,7 +23,7 @@
 // ============================================================
 // 1. CONFIGURATION
 // ============================================================
-#define FW_VERSION "1.8.2"
+#define FW_VERSION "1.8.3"
 #define DEVICE_ID "GATE-K3-01"
 #define FLOOR_NUMBER 3
 #define DEVICE_DIR DIR_IN // Options: DIR_IN (0) or DIR_OUT (1)
@@ -142,7 +142,7 @@ IPAddress deviceIP(192, 168, 11, 155);
 IPAddress dnsIP(8, 8, 8, 8); // Google DNS
 IPAddress gatewayIP(192, 168, 10, 1);
 IPAddress subnetMask(255, 255, 254, 0);
-IPAddress mqttServer(192, 168, 11, 54);
+IPAddress mqttServer(192, 168, 10, 124);
 const uint16_t MQTT_PORT = 1883;
 
 // Topics
