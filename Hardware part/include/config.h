@@ -5,7 +5,7 @@
 // ============================================================
 // 1. CONFIGURATION
 // ============================================================
-#define FW_VERSION "1.9.0"
+#define FW_VERSION "1.9.1"
 #define DEVICE_ID "GATE-K3-01"
 #define FLOOR_NUMBER 3
 #define DEVICE_DIR DIR_IN // Options: DIR_IN (0) or DIR_OUT (1)
@@ -63,7 +63,7 @@ inline IPAddress deviceIP(192, 168, 11, 155);
 inline IPAddress dnsIP(8, 8, 8, 8);
 inline IPAddress gatewayIP(192, 168, 10, 1);
 inline IPAddress subnetMask(255, 255, 254, 0);
-inline IPAddress mqttServer(192, 168, 10, 124);
+inline IPAddress mqttServer(192, 168, 10, 87);
 const uint16_t MQTT_PORT = 1883;
 
 // MQTT Topics
