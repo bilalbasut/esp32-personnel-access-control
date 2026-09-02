@@ -20,12 +20,6 @@ import paho.mqtt.publish as mqtt_publish
 from django.conf import settings
 from django.db import connection
 
-from core.models import Card
-
-HEADER_SIZE = 8
-RECORD_SIZE = 20
-
-
 def parse_floors(raw):
     """Mirrors server.js parseFloors(): normalize '1,3' / [1,3] into ints."""
     if raw is None:
@@ -51,6 +45,8 @@ def parse_floors(raw):
         return out
     return []
 
+HEADER_SIZE = 8
+RECORD_SIZE = 20
 
 def _next_acl_version():
     with connection.cursor() as cursor:
@@ -120,6 +116,7 @@ def build_acl_buffer(cards, version):
 def publish_acl_update():
     """Rebuilds the binary ACL from active cards and publishes it retained
     to pdks/merkez/cfg/acl, exactly like server.js's publishAclUpdate()."""
+    from cards.models import Card
     cards = list(
         Card.objects.filter(aktif=1).values_list(
             "uid", "floors", "valid_to", "win_start_m", "win_end_m", named=True
