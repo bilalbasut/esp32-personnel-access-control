@@ -1,25 +1,94 @@
 <script setup>
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { api } from '../api';
 import { usePolling } from '../composables/usePolling';
-import { usePagination } from '../composables/usePagination';
 import PaginationBar from '../components/PaginationBar.vue';
 
+// 1. Fetch employees and cards simultaneously
 const { data, error, refresh } = usePolling(
-  () => Promise.all([api.getEmployees(), api.getCards()]).then(([employees, cards]) => ({ employees, cards })),
-  30000
+  () =>
+    Promise.all([api.getEmployees(), api.getCards()]).then(([employees, cards]) => ({
+      employees: Array.isArray(employees) ? employees : (employees?.results || []),
+      cards: Array.isArray(cards) ? cards : (cards?.results || []),
+    })),
+  5000
 );
 
-const employeesList = computed(() => data.value.employees || []);
-const { page, totalPages, pageItems: pagedEmployees, next, prev } = usePagination(employeesList, 10);
+// 2. Map all employees to their assigned card UIDs
+const allEmployees = computed(() => {
+  const empList = data.value?.employees || [];
+  const cardList = data.value?.cards || [];
 
+  return empList.map((emp) => {
+    const matchedCard = cardList.find((c) => {
+      const empId =
+        typeof c.employee === 'object' && c.employee !== null
+          ? c.employee.id
+          : c.employee || c.employee_id;
+      return empId === emp.id;
+    });
+
+    return {
+      ...emp,
+      card_uid: matchedCard ? matchedCard.uid : null,
+    };
+  });
+});
+
+// 3. Pagination state and calculations expected by line 193
+const page = ref(1);
+const pageSize = ref(10);
+
+const totalPages = computed(() => {
+  const count = Math.ceil(allEmployees.value.length / pageSize.value);
+  return count > 0 ? count : 1;
+});
+
+// Auto-adjust page if list shrinks
+watch(totalPages, (newTotal) => {
+  if (page.value > newTotal) {
+    page.value = newTotal;
+  }
+});
+
+const prev = () => {
+  if (page.value > 1) page.value--;
+};
+
+const next = () => {
+  if (page.value < totalPages.value) page.value++;
+};
+
+const setPage = (p) => {
+  if (p >= 1 && p <= totalPages.value) page.value = p;
+};
+
+// Paginated slice passed to the table
+const employeesList = computed(() => {
+  const start = (page.value - 1) * pageSize.value;
+  return allEmployees.value.slice(start, start + pageSize.value);
+});
+
+// Alias in case any template section binds directly to employeesWithCards
+const employeesWithCards = allEmployees;
+
+// 4. Form handling
 const addForm = ref({ ad_soyad: '', departman: '' });
-const onboardForm = ref({ ad_soyad: '', departman: '', uid: '', floors: '1,2,3', win_start_m: 0, win_end_m: 1440 });
+const onboardForm = ref({
+  ad_soyad: '',
+  departman: '',
+  uid: '',
+  floors: '1,2,3',
+  win_start_m: 0,
+  win_end_m: 1440,
+});
 const feedback = ref(null);
 
 const setFeedback = (msg, type = 'success') => {
   feedback.value = { msg, type };
-  setTimeout(() => { feedback.value = null; }, 4000);
+  setTimeout(() => {
+    feedback.value = null;
+  }, 4000);
 };
 
 const handleAddEmployee = async () => {
@@ -38,33 +107,20 @@ const handleOnboard = async () => {
     const payload = {
       ...onboardForm.value,
       valid_from: Math.floor(Date.now() / 1000),
-      valid_to: Math.floor(Date.now() / 1000) + (86400 * 365 * 5),
+      valid_to: Math.floor(Date.now() / 1000) + 86400 * 365 * 5,
     };
     await api.addCardWithEmployee(payload);
-    setFeedback(`Onboarded ${onboardForm.value.ad_soyad} with Card ${onboardForm.value.uid}. Hardware synced.`);
-    onboardForm.value = { ad_soyad: '', departman: '', uid: '', floors: '1,2,3', win_start_m: 0, win_end_m: 1440 };
-    refresh();
-  } catch (err) {
-    setFeedback(err.message, 'danger');
-  }
-};
-
-const handleUnlink = async (emp) => {
-  if (!confirm(`Unlink card ${emp.card_uid} from ${emp.ad_soyad}?`)) return;
-  try {
-    await api.assignCard(emp.card_uid, { employee_id: null });
-    setFeedback(`Card unlinked from ${emp.ad_soyad}.`);
-    refresh();
-  } catch (err) {
-    setFeedback(err.message, 'danger');
-  }
-};
-
-const handleLink = async (emp, uid) => {
-  if (!uid) return;
-  try {
-    await api.assignCard(uid, { employee_id: emp.id });
-    setFeedback(`Card ${uid} assigned to ${emp.ad_soyad}.`);
+    setFeedback(
+      `Onboarded ${onboardForm.value.ad_soyad} with Card ${onboardForm.value.uid}. Hardware synced.`
+    );
+    onboardForm.value = {
+      ad_soyad: '',
+      departman: '',
+      uid: '',
+      floors: '1,2,3',
+      win_start_m: 0,
+      win_end_m: 1440,
+    };
     refresh();
   } catch (err) {
     setFeedback(err.message, 'danger');
@@ -144,7 +200,7 @@ const handleLink = async (emp, uid) => {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="emp in pagedEmployees" :key="emp.id">
+            <tr v-for="emp in employeesWithCards" :key="emp.id">
               <td>#{{ emp.id }}</td>
               <td class="fw-semibold">{{ emp.ad_soyad }}</td>
               <td>{{ emp.departman || '—' }}</td>

@@ -4,66 +4,79 @@ import { api } from '../api';
 import { usePolling } from '../composables/usePolling';
 import { formatDateTime, formatDirection, isDeviceOnline, resultLabel } from '../utils/format';
 
-// 1. Poll Devices and Database KPIs normally every 3s
-const { data: telemetry, error: telemetryErr } = usePolling(
-  () => Promise.all([
-    api.getDevices(),
-    api.getDashboardKpis()
-  ]).then(([devices, kpis]) => ({ devices, kpis })),
+// 1. Primary Polling: Events & Devices (every 3s)
+const { data: primaryData, error: primaryErr } = usePolling(
+  () =>
+    Promise.all([api.getEvents(), api.getDevices()]).then(([events, devices]) => ({
+      events: Array.isArray(events) ? events : (events?.results || []),
+      devices: Array.isArray(devices) ? devices : (devices?.results || []),
+    })),
   3000
 );
 
-// 2. Stateful Event Delta Tracker
-const events = ref([]);
-const latestId = ref(null);
-const eventsErr = ref(null);
+// 2. Entity Polling: Employees & Cards (every 20s)
+const { data: entityData } = usePolling(
+  () =>
+    Promise.all([api.getEmployees(), api.getCards()]).then(([employees, cards]) => ({
+      employees: Array.isArray(employees) ? employees : (employees?.results || []),
+      cards: Array.isArray(cards) ? cards : (cards?.results || []),
+    })),
+  20000
+);
 
 const currentTime = ref(Date.now());
-let eventTimer = null;
-let clockTimer = null;
-
-const pollEventDelta = async () => {
-  try {
-    const params = latestId.value ? { since_id: latestId.value } : {};
-    const res = await api.getEvents(params);
-
-    if (!latestId.value) {
-      // First load: snapshot of latest 50 events (ordered DESC)
-      events.value = res || [];
-      if (events.value.length > 0) {
-        latestId.value = events.value[0].id;
-      }
-    } else if (res && res.length > 0) {
-      // Delta batch received (ordered ASC: oldest -> newest in batch)
-      latestId.value = res[res.length - 1].id;
-      events.value = [...res.slice().reverse(), ...events.value].slice(0, 50);
-    }
-    eventsErr.value = null;
-  } catch (err) {
-    eventsErr.value = err.message || 'Failed to stream live events';
-  }
-};
+let timer = null;
 
 onMounted(() => {
-  pollEventDelta();
-  eventTimer = setInterval(pollEventDelta, 3000);
-  clockTimer = setInterval(() => { currentTime.value = Date.now(); }, 3000);
+  timer = setInterval(() => {
+    currentTime.value = Date.now();
+  }, 1000);
 });
 
 onUnmounted(() => {
-  if (eventTimer) clearInterval(eventTimer);
-  if (clockTimer) clearInterval(clockTimer);
+  if (timer) clearInterval(timer);
 });
 
-// Computed properties for template binding
-const devices = computed(() => telemetry.value.devices || []);
-const kpis = computed(() => telemetry.value.kpis || {});
-const error = computed(() => telemetryErr.value || eventsErr.value);
-
 const nowSec = computed(() => Math.floor(currentTime.value / 1000));
-const onlineCount = computed(() => devices.value.filter((d) => isDeviceOnline(d, nowSec.value)).length);
-</script>
 
+// Raw arrays from polling
+const devices = computed(() => primaryData.value?.devices || []);
+const employees = computed(() => entityData.value?.employees || []);
+const cards = computed(() => entityData.value?.cards || []);
+
+// Consistently sorted newest-first to prevent list flipping
+const events = computed(() => {
+  const list = [...(primaryData.value?.events || [])];
+  return list.sort((a, b) => {
+    const tsA = Number(a.ts_utc || 0);
+    const tsB = Number(b.ts_utc || 0);
+    if (tsB !== tsA) return tsB - tsA;
+    return Number(b.id || 0) - Number(a.id || 0);
+  });
+});
+
+// Device online calculations
+const onlineCount = computed(() => {
+  return devices.value.filter((d) => isDeviceOnline(d.son_gorulme, nowSec.value)).length;
+});
+
+// KPIs required by the template cards
+const kpis = computed(() => {
+  const totalEmployees = employees.value.length;
+  const totalCards = cards.value.length;
+  const activeCards = cards.value.filter((c) => c.aktif === 1 || c.aktif === true).length;
+  const onlineDevices = onlineCount.value;
+  const totalDevices = devices.value.length;
+
+  return {
+    total_employees: totalEmployees,
+    total_cards: totalCards,
+    active_cards: activeCards,
+    online_devices: onlineDevices,
+    total_devices: totalDevices,
+  };
+});
+</script>
 <template>
   <div>
     <div class="mb-4">
@@ -131,7 +144,7 @@ const onlineCount = computed(() => devices.value.filter((d) => isDeviceOnline(d,
             <tr v-if="events.length === 0">
               <td colspan="6" class="text-center py-4 text-muted">No scan events received yet.</td>
             </tr>
-            <tr v-for="ev in events" :key="ev.id">
+            <tr v-for="ev in events" :key="ev.id || `${ev.device_id}-${ev.seq}`">
               <td class="font-monospace small">
                 {{ formatDateTime(ev.ts_utc) }}
                 <span v-if="Number(ev.mode) === 1" class="badge bg-warning text-dark ms-1" title="Stored locally in flash while offline">⚡ Offline Sync</span>

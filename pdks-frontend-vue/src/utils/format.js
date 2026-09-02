@@ -64,10 +64,29 @@ export function hhmmToMinutes(hhmm) {
   return (h * 60) + (m || 0);
 }
 
-// Determines if gate unit is online based on heartbeat threshold (45s)
-export function isDeviceOnline(device, nowSec) {
-  if (!device || !device.son_gorulme) return false;
-  return (nowSec - Number(device.son_gorulme)) < 45;
+
+// determines if gate unit is online based on heartbeat threshold (45s)
+// src/utils/format.js
+
+export function isDeviceOnline(son_gorulme, nowSec = null, thresholdSec = 90) {
+  if (!son_gorulme) return false;
+
+  // If nowSec is omitted or undefined, fallback to current UTC epoch seconds
+  const currentSec = (nowSec !== null && nowSec !== undefined && !isNaN(nowSec))
+    ? Number(nowSec)
+    : Math.floor(Date.now() / 1000);
+
+  let lastSeen = Number(son_gorulme);
+  if (isNaN(lastSeen) || lastSeen <= 0) return false;
+
+  // Auto-detect if timestamp was provided in milliseconds
+  if (lastSeen > 1000000000000) {
+    lastSeen = Math.floor(lastSeen / 1000);
+  }
+
+  const diff = currentSec - lastSeen;
+  // Allow slight future clock drift (-5s) up to thresholdSec
+  return diff >= -5 && diff <= thresholdSec;
 }
 
 // Formats gate direction enum (0 = IN, 1 = OUT)

@@ -29,7 +29,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
 
         device = self.get_object()
         seq = next(_cmd_seq_counter)
-        topic = f"pdks/{device.id}/cmd"
+        topic = f"pdks/merkez/dev/{device.id}/cmd"
 
         payload = {
             "cmd": cmd,
@@ -57,7 +57,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
         bin_filename = f"firmware_{version}.bin"
         ota_url = f"{settings.PANEL_BASE_URL.rstrip('/')}/firmware/{bin_filename}"
 
-        topic = f"pdks/{device.id}/cmd"
+        topic = f"pdks/merkez/dev/{device.id}/cmd"
         payload = {
             "cmd": "ota",
             "seq": next(_cmd_seq_counter),

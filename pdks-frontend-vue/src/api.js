@@ -5,67 +5,134 @@ async function request(endpoint, options = {}) {
   const config = {
     method: options.method || 'GET',
     headers: {
-      'Content-Type': 'application/json',
       ...options.headers,
     },
   };
-  if (options.body) {
-    config.body = typeof options.body === 'string' ? options.body : JSON.stringify(options.body);
+
+  // Only set application/json if not sending FormData
+  if (!(options.body instanceof FormData)) {
+    config.headers['Content-Type'] = 'application/json';
+    if (options.body) {
+      config.body = typeof options.body === 'string' ? options.body : JSON.stringify(options.body);
+    }
+  } else {
+    config.body = options.body;
   }
 
   const response = await fetch(url, config);
+
   if (!response.ok) {
-    const errData = await response.json().catch(() => ({}));
-    throw new Error(errData.error || `Request failed with status ${response.status}`);
+    let errorMessage = `Request failed with status ${response.status}`;
+    try {
+      const errData = await response.json();
+      if (errData.error) {
+        errorMessage = errData.error;
+      } else if (typeof errData === 'object') {
+        // Flatten DRF field errors: { uid: ["Field required"] } -> "uid: Field required"
+        errorMessage = Object.entries(errData)
+          .map(([key, val]) => `${key}: ${Array.isArray(val) ? val.join(', ') : val}`)
+          .join(' | ');
+      }
+    } catch {
+      // Body not JSON
+    }
+    throw new Error(errorMessage);
   }
+
+  // Handle 204 No Content or responses without a body
+  const contentType = response.headers.get('content-type');
+  if (response.status === 204 || (contentType && !contentType.includes('application/json'))) {
+    return null;
+  }
+
   return response.json();
 }
 
 export const api = {
-  // Live Feed & Fleet
-  getEvents: (params = {}) => {
-    const q = new URLSearchParams(params).toString();
-    return request(q ? `/api/events?${q}` : '/api/events');
-  },
+  // Events
+  getEvents: () => request('/api/events'),
+
+  // Devices
   getDevices: () => request('/api/devices'),
-  getDashboardKpis: () => request('/api/dashboard/kpis'),
+  sendDeviceCommand: (deviceId, cmd, payload = {}) =>
+    request(`/api/devices/${encodeURIComponent(deviceId)}/command`, {
+      method: 'POST',
+      body: { cmd, payload },
+    }),
+  triggerDeviceOta: (deviceId, version) =>
+    request(`/api/devices/${encodeURIComponent(deviceId)}/ota`, {
+      method: 'POST',
+      body: { version },
+    }),
+
+  // Cards
+  getCards: () => request('/api/cards'),
+  addCard: (cardData) =>
+    request('/api/cards', {
+      method: 'POST',
+      body: cardData,
+    }),
+  addCardWithEmployee: (data) =>
+    request('/api/cards/add', {
+      method: 'POST',
+      body: data,
+    }),
+  assignCard: (uid, employeeId, aktif = undefined) =>
+    request(`/api/cards/${encodeURIComponent(uid)}/assign`, {
+      method: 'PUT',
+      body: {
+        employee_id: employeeId !== null && employeeId !== '' ? Number(employeeId) : null,
+        ...(aktif !== undefined && { aktif }),
+      },
+    }),
+  revokeCard: (uid) =>
+    request('/api/cards/revoke', {
+      method: 'POST',
+      body: { uid },
+    }),
+  deleteCard: (uid) =>
+    request(`/api/cards/${encodeURIComponent(uid)}`, {
+      method: 'DELETE',
+    }),
 
   // Employees
   getEmployees: () => request('/api/employees'),
-  addEmployee: (payload) => request('/api/employees', { method: 'POST', body: payload }),
+  addEmployee: (employeeData) =>
+    request('/api/employees', {
+      method: 'POST',
+      body: employeeData,
+    }),
+  deleteEmployee: (id) =>
+    request(`/api/employees/${id}`, {
+      method: 'DELETE',
+    }),
 
-  // Cards & ACL
-  getCards: () => request('/api/cards'),
-  addCard: (payload) => request('/api/cards', { method: 'POST', body: payload }),
-  addCardWithEmployee: (payload) => request('/api/cards/add', { method: 'POST', body: payload }),
-  revokeCard: (uid) => request('/api/cards/revoke', { method: 'POST', body: { uid } }),
-  deleteCard: (uid) => request(`/api/cards/${encodeURIComponent(uid)}`, { method: 'DELETE' }),
-  assignCard: (uid, payload) => request(`/api/cards/${encodeURIComponent(uid)}/assign`, { method: 'PUT', body: payload }),
+  // Firmware
+  getFirmware: () => request('/api/firmware'),
+  uploadFirmware: (version, file) => {
+    const formData = new FormData();
+    formData.append('version', version);
+    formData.append('file', file);
+    return request('/api/firmware/upload', {
+      method: 'POST',
+      body: formData,
+    });
+  },
 
   // Reports
   getPdksReport: (params) => {
-    const q = new URLSearchParams(params).toString();
-    return request(`/api/reports/pdks?${q}`);
+    const query = new URLSearchParams();
+    if (params.start_ts) query.set('start_ts', params.start_ts);
+    if (params.end_ts) query.set('end_ts', params.end_ts);
+    if (params.employee_id) query.set('employee_id', params.employee_id);
+    return request(`/api/reports/pdks?${query.toString()}`);
   },
-  pdksCsvUrl: (params) => {
-    const q = new URLSearchParams({ ...params, format: 'csv' }).toString();
-    return `${BASE_URL}/api/reports/pdks?${q}`;
-  },
-
-  // Hardware Commands & OTA
-  sendDeviceCommand: (id, cmd) => request(`/api/devices/${encodeURIComponent(id)}/command`, { method: 'POST', body: { cmd } }),
-  triggerOta: (id, version) => request(`/api/devices/${encodeURIComponent(id)}/ota`, { method: 'POST', body: { version } }),
-
-  // Firmware Repository
-  getFirmware: () => request('/api/firmware'),
-  uploadFirmware: async (version, file) => {
-    const res = await fetch(`${BASE_URL}/api/firmware/upload?version=${encodeURIComponent(version)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: file,
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `Upload failed (${res.status})`);
-    return data;
+  getPdksReportCsvUrl: (params) => {
+    const query = new URLSearchParams();
+    if (params.start_ts) query.set('start_ts', params.start_ts);
+    if (params.end_ts) query.set('end_ts', params.end_ts);
+    if (params.employee_id) query.set('employee_id', params.employee_id);
+    query.set('format', 'csv');
+    return `${BASE_URL}/api/reports/pdks?${query.toString()}`;
   },
 };

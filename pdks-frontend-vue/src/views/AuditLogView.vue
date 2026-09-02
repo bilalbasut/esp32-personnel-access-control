@@ -8,7 +8,11 @@ const { data: events, error, refresh } = usePolling(() => api.getEvents(), 5000,
 const filterType = ref('all');
 
 const auditEvents = computed(() => {
-  return events.value.filter((ev) => {
+  const evList = Array.isArray(events.value)
+    ? events.value
+    : (events.value?.results || []);
+  
+  return evList.filter((ev) => {
     const isDenied = ev.result !== 0 && ev.result !== 4;
     const isSuspectTime = ev.ts_source === 2;
     if (filterType.value === 'denied') return isDenied;

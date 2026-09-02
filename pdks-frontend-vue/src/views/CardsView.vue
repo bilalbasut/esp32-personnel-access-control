@@ -6,8 +6,13 @@ import { usePagination } from '../composables/usePagination';
 import PaginationBar from '../components/PaginationBar.vue';
 import { formatDateTime, minutesToHHMM, hhmmToMinutes } from '../utils/format';
 
+// 1. Safe polling for cards and employees
 const { data, error, refresh } = usePolling(
-  () => Promise.all([api.getCards(), api.getEmployees()]).then(([cards, employees]) => ({ cards, employees })),
+  () =>
+    Promise.all([api.getCards(), api.getEmployees()]).then(([cards, employees]) => ({
+      cards: Array.isArray(cards) ? cards : (cards?.results || []),
+      employees: Array.isArray(employees) ? employees : (employees?.results || []),
+    })),
   30000
 );
 
@@ -17,7 +22,11 @@ const defaultExpiryDate = () => {
   return d.toISOString().substring(0, 10);
 };
 
-const cardsList = computed(() => data.value.cards || []);
+// Ensure cardsList and employeesList are always valid arrays
+const cardsList = computed(() => (Array.isArray(data.value?.cards) ? data.value.cards : []));
+const employeesList = computed(() => (Array.isArray(data.value?.employees) ? data.value.employees : []));
+
+// Pagination composable hook
 const { page, totalPages, pageItems: pagedCards, next, prev } = usePagination(cardsList, 10);
 
 const newCard = ref({
@@ -32,14 +41,16 @@ const feedback = ref(null);
 
 const setFeedback = (msg, type = 'success') => {
   feedback.value = { msg, type };
-  setTimeout(() => { feedback.value = null; }, 4000);
+  setTimeout(() => {
+    feedback.value = null;
+  }, 4000);
 };
 
 const handleRegisterCard = async () => {
   try {
     const validToEpoch = newCard.value.valid_until
       ? Math.floor(new Date(`${newCard.value.valid_until}T23:59:59+03:00`).getTime() / 1000)
-      : Math.floor(Date.now() / 1000) + (86400 * 365 * 5);
+      : Math.floor(Date.now() / 1000) + 86400 * 365 * 5;
 
     const payload = {
       uid: newCard.value.uid.toUpperCase().trim(),
@@ -77,9 +88,11 @@ const handleRevoke = async (uid) => {
   }
 };
 
+// Fix: Read employee id from nested DRF object and pass positional arguments to api.assignCard
 const handleReactivate = async (card) => {
   try {
-    await api.assignCard(card.uid, { employee_id: card.employee_id || null, aktif: 1 });
+    const empId = card.employee?.id ?? card.employee_id ?? null;
+    await api.assignCard(card.uid, empId, 1);
     setFeedback(`Card ${card.uid} reactivated.`);
     refresh();
   } catch (err) {
@@ -122,7 +135,7 @@ const handleDelete = async (uid) => {
             <label class="form-label small mb-0 fw-semibold">Holder</label>
             <select class="form-select" v-model="newCard.employee_id">
               <option value="">— Unassigned (Inventory) —</option>
-              <option v-for="emp in data.employees || []" :key="emp.id" :value="emp.id">{{ emp.ad_soyad }}</option>
+              <option v-for="emp in employeesList" :key="emp.id" :value="emp.id">{{ emp.ad_soyad }}</option>
             </select>
           </div>
           <div class="col-md-2">
@@ -169,7 +182,8 @@ const handleDelete = async (uid) => {
           <tbody>
             <tr v-for="card in pagedCards" :key="card.uid">
               <td><code class="fw-bold text-dark fs-6">{{ card.uid }}</code></td>
-              <td>{{ card.ad_soyad || 'Unassigned' }}</td>
+              <!-- Fix: Access nested employee name -->
+              <td>{{ card.employee?.ad_soyad || card.ad_soyad || 'Unassigned' }}</td>
               <td><span class="badge bg-light text-dark border">{{ card.floors || 'None' }}</span></td>
               <td class="small">{{ minutesToHHMM(card.win_start_m) }} – {{ minutesToHHMM(card.win_end_m) }}</td>
               <td class="small text-muted">{{ formatDateTime(card.valid_to) }}</td>
@@ -185,6 +199,9 @@ const handleDelete = async (uid) => {
                   <button class="btn btn-outline-danger" @click="handleDelete(card.uid)">Delete</button>
                 </div>
               </td>
+            </tr>
+            <tr v-if="cardsList.length === 0">
+              <td colspan="7" class="text-center text-muted py-3">No cards registered yet.</td>
             </tr>
           </tbody>
         </table>
