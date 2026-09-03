@@ -12,8 +12,7 @@ public:
     static bool queueIsEmpty();
     static void advanceReadPointer();
     static void saveCheckpoint(bool force = false);
-    static void incrementAcks();
-    
+
     static uint32_t getReadPointer();
     static uint32_t getQueueCount();
     static uint32_t getQueueOverflowCount();

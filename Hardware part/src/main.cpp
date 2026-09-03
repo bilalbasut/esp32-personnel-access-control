@@ -27,6 +27,7 @@ void setup() {
 
     IOController::init();
     EventQueue::init();
+    //!! EventQueue::init() must be called before ACLEngine::init() because it reads the ACL version from persistent storage.
     ACLEngine::init();
     RTCService::init();
     RFIDReader::init();

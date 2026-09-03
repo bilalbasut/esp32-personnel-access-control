@@ -5,7 +5,6 @@
 #include "config.h"
 #include "../hal/rtc_service.h"
 #include "../network/network_manager.h"
-#include "../domain/acl_engine.h"
 
 static Preferences preferences;
 static uint32_t readPointer = 0, writePointer = 0, globalSequence = 0;
@@ -132,7 +131,11 @@ void EventQueue::saveCheckpoint(bool force) {
     preferences.putUInt("writePtr", writePointer);
     preferences.putUInt("qCount", queueCount);
     preferences.putUInt("seq", globalSequence);
-    preferences.putUInt("aclVer", ACLEngine::getCurrentVersion());
+    // aclVer is intentionally NOT written here - ACLEngine owns that key
+    // exclusively via its own Preferences handle (see ACLEngine::init(),
+    // ::resetVersion(), ::processACLUpdate()). Writing it from here too was
+    // redundant (same namespace, same key, two handles) and never the
+    // source of truth - EventQueue never reads it back.
     eventsSinceCheckpoint = 0; acksSinceCheckpoint = 0;
 }
 
@@ -150,10 +153,6 @@ void EventQueue::advanceReadPointer() {
     portEXIT_CRITICAL(&queueMux);
     acksSinceCheckpoint++;
     saveCheckpoint(false);
-}
-
-void EventQueue::incrementAcks() {
-    acksSinceCheckpoint++;
 }
 
 uint32_t EventQueue::getReadPointer() { return readPointer; }
