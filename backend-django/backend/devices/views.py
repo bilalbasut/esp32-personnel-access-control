@@ -83,8 +83,13 @@ class DeviceViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-        server_ip = getattr(settings, "HOST_LAN_IP", os.environ.get("HOST_LAN_IP", "192.168.1.50"))
-        ota_url = f"http://{server_ip}:3000/api/firmware/{fw.version}/download"
+        server_ip = getattr(settings, "PANEL_BASE_URL", os.environ.get("PANEL_BASE_URL"))
+        if not server_ip:
+            return Response(
+                {"error": "PANEL_BASE_URL is not configured in settings or environment."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        ota_url = f"{server_ip}/api/firmware/{fw.version}/download"
         topic = f"pdks/merkez/dev/{device.id}/cmd"
         seq = next(_cmd_seq_counter)
 
@@ -94,7 +99,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
             "url": ota_url,
             "version": str(fw.version),
             "md5": md5_hash,
-            "size": int(getattr(fw, "file_size", 0) or 0)
+            "size": int(getattr(fw, "size", 0) or 0)
         }
 
         try:

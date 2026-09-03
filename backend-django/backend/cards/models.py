@@ -1,17 +1,18 @@
 from django.db import models
 
+from core.models import ExternallyManagedModel
 
-class Employee(models.Model):
+
+class Employee(ExternallyManagedModel):
     ad_soyad = models.CharField(max_length=255, null=True, blank=True)
     departman = models.CharField(max_length=100, null=True, blank=True)
     aktif = models.SmallIntegerField(default=1)
 
-    class Meta:
+    class Meta(ExternallyManagedModel.Meta):
         db_table = "employees"
-        managed = False
 
 
-class Card(models.Model):
+class Card(ExternallyManagedModel):
     uid = models.CharField(max_length=50, primary_key=True)
     employee = models.ForeignKey(
         Employee, null=True, blank=True, on_delete=models.SET_NULL,
@@ -24,6 +25,5 @@ class Card(models.Model):
     win_end_m = models.SmallIntegerField(default=1440)
     aktif = models.SmallIntegerField(default=1)
 
-    class Meta:
+    class Meta(ExternallyManagedModel.Meta):
         db_table = "cards"
-        managed = False

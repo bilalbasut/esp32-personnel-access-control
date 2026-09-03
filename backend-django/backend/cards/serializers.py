@@ -40,6 +40,18 @@ class CardSerializer(serializers.ModelSerializer):
 
         return attrs
 
+    def create(self, validated_data):
+        # A freshly-registered card with no employee attached must not grant
+        # access by default. The model's `aktif` default is 1 (needed so
+        # `assign`/onboard, which set aktif explicitly, keep working), so we
+        # only apply the inactive-until-assigned rule here: when the caller
+        # didn't send "aktif" explicitly AND didn't attach an employee, force
+        # aktif=0. This restores the original server.js/pre-migration
+        # behavior for the plain POST /api/cards path.
+        if "aktif" not in self.initial_data and validated_data.get("employee") is None:
+            validated_data["aktif"] = 0
+        return super().create(validated_data)
+
 
 class CardOnboardSerializer(serializers.Serializer):
     """Handles the legacy /cards/add endpoint: creates employee and card simultaneously."""

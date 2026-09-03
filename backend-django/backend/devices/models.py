@@ -1,7 +1,9 @@
 from django.db import models
 
+from core.models import ExternallyManagedModel
 
-class Device(models.Model):
+
+class Device(ExternallyManagedModel):
     id = models.CharField(max_length=50, primary_key=True)
     ad = models.CharField(max_length=100, null=True, blank=True)
     kat = models.IntegerField(null=True, blank=True)
@@ -15,6 +17,5 @@ class Device(models.Model):
     ota_status = models.CharField(max_length=50, null=True, blank=True)
     ota_updated_at = models.BigIntegerField(null=True, blank=True)
 
-    class Meta:
+    class Meta(ExternallyManagedModel.Meta):
         db_table = "devices"
-        managed = False  # Avoids conflict if migration history already created it under core

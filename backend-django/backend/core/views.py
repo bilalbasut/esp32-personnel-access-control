@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from django.conf import settings
 from django.db import connection
-from django.http import HttpResponse
+from django.http import HttpResponse, FileResponse
 
 from rest_framework import viewsets, status, mixins
 from rest_framework.views import APIView
@@ -41,10 +41,12 @@ class EventViewSet(viewsets.ReadOnlyModelViewSet):
 
 class FirmwareViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     """
-    Replaces GET /api/firmware and POST /api/firmware/upload.
+    Handles firmware registry listing, uploads, and raw binary streaming for ESP32 OTA.
     """
     queryset = Firmware.objects.all().order_by("-uploaded_at")
     serializer_class = FirmwareSerializer
+    lookup_field = "version"
+    lookup_value_regex = r"[^/]+"  # CRITICAL: Allows dots in version strings (e.g. 1.9.3)
 
     @action(
         detail=False,
@@ -88,6 +90,26 @@ class FirmwareViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
             status=status.HTTP_201_CREATED
         )
 
+    @action(detail=True, methods=["get"], url_path="download")
+    def download(self, request, version=None):
+        """
+        Streams the binary file directly to the ESP32 W5500 client.
+        Serves: GET /api/firmware/<version>/download/
+        """
+        firmware = self.get_object()
+        file_path = os.path.join(settings.FIRMWARE_DIR, firmware.filename)
+
+        if not os.path.isfile(file_path):
+            return Response(
+                {"error": f"Binary file '{firmware.filename}' not found on disk."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # FileResponse sets Content-Length and streams in binary chunks
+        response = FileResponse(open(file_path, "rb"), content_type="application/octet-stream")
+        response["Content-Length"] = os.path.getsize(file_path)
+        return response
+
 
 class PdksReportView(APIView):
     """
@@ -121,9 +143,9 @@ class PdksReportView(APIView):
             SELECT
                 a.employee_id,
                 CASE
-                    WHEN a.device_id LIKE 'GATE-K3-%' THEN 'MAIN'
-                    WHEN a.device_id LIKE 'GATE-K2-%' THEN 'BREAK_ROOM'
-                    WHEN a.device_id LIKE 'GATE-K1-%' THEN 'MESS_HALL'
+                    WHEN a.device_id LIKE 'GATE-K3-%%' THEN 'MAIN'
+                    WHEN a.device_id LIKE 'GATE-K2-%%' THEN 'BREAK_ROOM'
+                    WHEN a.device_id LIKE 'GATE-K1-%%' THEN 'MESS_HALL'
                     ELSE 'MAIN'
                 END AS zone,
                 TO_CHAR(TO_TIMESTAMP(a.ts_utc) AT TIME ZONE %s, 'YYYY-MM-DD') AS working_date,
@@ -192,7 +214,10 @@ class PdksReportView(APIView):
             return f"{h:02d}:{m:02d}:{s:02d}"
 
         def csv_escape(v):
-            return f'"{str(v).replace('"', '""')}"' if v is not None else '""'
+            if v is None:
+                return '""'
+            escaped = str(v).replace('"', '""')
+            return f'"{escaped}"'
 
         header = "Personel No,Ad Soyad,Departman,Tarih,İlk Giriş,Son Çıkış,Toplam Çalışma Süresi,Yemek Molası,Mola\n"
         lines = []
