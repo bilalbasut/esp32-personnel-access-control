@@ -97,6 +97,11 @@ export const api = {
     request(`/api/cards/${encodeURIComponent(uid)}`, {
       method: 'DELETE',
     }),
+  updateCard: (uid, data) =>
+    request(`/api/cards/${encodeURIComponent(uid)}`, {
+      method: 'PATCH',
+      body: data,
+    }),
 
   // Employees
   getEmployees: () => request('/api/employees'),
@@ -104,6 +109,11 @@ export const api = {
     request('/api/employees', {
       method: 'POST',
       body: employeeData,
+    }),
+  updateEmployee: (id, data) =>
+    request(`/api/employees/${id}`, {
+      method: 'PATCH',
+      body: data,
     }),
   deleteEmployee: (id) =>
     request(`/api/employees/${id}`, {

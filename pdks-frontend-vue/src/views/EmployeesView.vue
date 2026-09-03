@@ -4,6 +4,7 @@ import { api } from '../api';
 import { usePolling } from '../composables/usePolling';
 import { usePagination } from '../composables/usePagination';
 import PaginationBar from '../components/PaginationBar.vue';
+import EmployeeFormModal from '../components/EmployeeFormModal.vue';
 
 // 1. Fetch employees and cards simultaneously
 const { data, error, refresh } = usePolling(
@@ -46,18 +47,7 @@ const { page, totalPages, pageItems: employeesList, next, prev } = usePagination
 // only reliable signal here.
 const unassignedCards = computed(() => (data.value?.cards || []).filter((c) => !c.employee));
 
-// 4. Form handling
-const addForm = ref({ full_name: '', department: '' });
-const onboardForm = ref({
-  full_name: '',
-  department: '',
-  uid: '',
-  floors: '1,2,3',
-  win_start_m: 0,
-  win_end_m: 1440,
-});
 const feedback = ref(null);
-
 const setFeedback = (msg, type = 'success') => {
   feedback.value = { msg, type };
   setTimeout(() => {
@@ -65,36 +55,38 @@ const setFeedback = (msg, type = 'success') => {
   }, 4000);
 };
 
-const handleAddEmployee = async () => {
-  try {
-    await api.addEmployee(addForm.value);
-    setFeedback(`Employee ${addForm.value.full_name} created.`);
-    addForm.value = { full_name: '', department: '' };
-    refresh();
-  } catch (err) {
-    setFeedback(err.message, 'danger');
-  }
+// Add/Edit modal (replaces the old always-open "Add Staff" / "Instant
+// Onboard" form panels - one reusable modal, two modes).
+const modalShow = ref(false);
+const modalMode = ref('add');
+const editingEmployee = ref(null);
+
+const openAdd = () => {
+  modalMode.value = 'add';
+  editingEmployee.value = null;
+  modalShow.value = true;
 };
 
-const handleOnboard = async () => {
+const openEdit = (emp) => {
+  modalMode.value = 'edit';
+  editingEmployee.value = emp;
+  modalShow.value = true;
+};
+
+const handleSaved = () => {
+  setFeedback(modalMode.value === 'edit' ? 'Employee updated.' : 'Employee created.');
+  refresh();
+};
+
+// Deactivate/Reactivate - separate from Delete (which soft-deletes and
+// removes the row from every listing entirely). Deactivating just flips
+// is_active, same "temporarily out" vs. "gone for good" distinction Cards
+// already has via Revoke vs. Delete.
+const handleToggleActive = async (emp) => {
+  const goingInactive = emp.is_active;
   try {
-    const payload = {
-      ...onboardForm.value,
-      valid_from: Math.floor(Date.now() / 1000),
-      valid_to: Math.floor(Date.now() / 1000) + 86400 * 365 * 5,
-    };
-    await api.addCardWithEmployee(payload);
-    setFeedback(
-      `Onboarded ${onboardForm.value.full_name} with Card ${onboardForm.value.uid}. Hardware synced.`
-    );
-    onboardForm.value = {
-      full_name: '',
-      department: '',
-      uid: '',
-      floors: '1,2,3',
-      win_start_m: 0,
-      win_end_m: 1440,
-    };
+    await api.updateEmployee(emp.id, { is_active: !emp.is_active });
+    setFeedback(`${emp.full_name} ${goingInactive ? 'deactivated' : 'reactivated'}.`);
     refresh();
   } catch (err) {
     setFeedback(err.message, 'danger');
@@ -127,58 +119,16 @@ const handleUnlink = async (emp) => {
 
 <template>
   <div>
-    <div class="mb-4">
-      <h3 class="fw-bold mb-1">Personnel Directory</h3>
-      <p class="text-muted small">Manage enterprise employees and hardware RFID credentials.</p>
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <div>
+        <h3 class="fw-bold mb-1">Personnel Directory</h3>
+        <p class="text-muted small mb-0">Manage enterprise employees and hardware RFID credentials.</p>
+      </div>
+      <button class="btn btn-dark" @click="openAdd">+ Add Employee</button>
     </div>
 
     <div v-if="feedback" :class="`alert alert-${feedback.type}`">{{ feedback.msg }}</div>
     <div v-if="error" class="alert alert-danger">{{ error }}</div>
-
-    <!-- Action Forms Accordion / Grid -->
-    <div class="row g-3 mb-4">
-      <div class="col-md-5">
-        <div class="card shadow-sm h-100">
-          <div class="card-header bg-white fw-bold">Add Staff (No Card)</div>
-          <div class="card-body">
-            <form @submit.prevent="handleAddEmployee">
-              <div class="mb-2">
-                <input class="form-control" placeholder="Full Name" v-model="addForm.full_name" required />
-              </div>
-              <div class="mb-2">
-                <input class="form-control" placeholder="Department (e.g. Engineering)" v-model="addForm.department" />
-              </div>
-              <button type="submit" class="btn btn-outline-dark w-100 btn-sm">Create Profile</button>
-            </form>
-          </div>
-        </div>
-      </div>
-
-      <div class="col-md-7">
-        <div class="card shadow-sm h-100">
-          <div class="card-header bg-white fw-bold">Instant Onboard (Staff + RFID Card)</div>
-          <div class="card-body">
-            <form @submit.prevent="handleOnboard" class="row g-2">
-              <div class="col-md-6">
-                <input class="form-control form-control-sm" placeholder="Full Name" v-model="onboardForm.full_name" required />
-              </div>
-              <div class="col-md-6">
-                <input class="form-control form-control-sm" placeholder="Department" v-model="onboardForm.department" />
-              </div>
-              <div class="col-md-6">
-                <input class="form-control form-control-sm font-monospace" placeholder="Card UID (HEX)" v-model="onboardForm.uid" required />
-              </div>
-              <div class="col-md-6">
-                <input class="form-control form-control-sm" placeholder="Floors (e.g. 1,2,3)" v-model="onboardForm.floors" required />
-              </div>
-              <div class="col-12 mt-2">
-                <button type="submit" class="btn btn-primary w-100 btn-sm">Provision &amp; Sync to Hardware</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      </div>
-    </div>
 
     <!-- Employee Table -->
     <div class="card shadow-sm">
@@ -192,8 +142,10 @@ const handleUnlink = async (emp) => {
               <th>ID</th>
               <th>Full Name</th>
               <th>Department</th>
+              <th>Badge #</th>
+              <th>Status</th>
               <th>Assigned RFID UID</th>
-              <th class="text-end">Credential Binding</th>
+              <th class="text-end">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -201,14 +153,35 @@ const handleUnlink = async (emp) => {
               <td>#{{ emp.id }}</td>
               <td class="fw-semibold">{{ emp.full_name }}</td>
               <td>{{ emp.department || '—' }}</td>
+              <td class="font-monospace small">{{ emp.employee_no || '—' }}</td>
+              <td>
+                <span class="badge" :class="emp.is_active ? 'bg-success' : 'bg-secondary'">
+                  {{ emp.is_active ? 'Active' : 'Inactive' }}
+                </span>
+              </td>
               <td>
                 <span v-if="emp.card_uid" class="font-monospace fw-bold">{{ emp.card_uid }}</span>
                 <span v-else class="text-muted small">No card assigned</span>
               </td>
               <td class="text-end">
-                <button v-if="emp.card_uid" class="btn btn-outline-danger btn-sm" @click="handleUnlink(emp)">Unlink</button>
-                <div v-else class="d-inline-flex gap-1">
-                  <select class="form-select form-select-sm" style="max-width: 170px;" @change="(e) => handleLink(emp, e.target.value)">
+                <div class="btn-group btn-group-sm">
+                  <button class="btn btn-outline-secondary" @click="openEdit(emp)">Edit</button>
+                  <button
+                    class="btn"
+                    :class="emp.is_active ? 'btn-outline-warning' : 'btn-outline-success'"
+                    @click="handleToggleActive(emp)"
+                  >
+                    {{ emp.is_active ? 'Deactivate' : 'Reactivate' }}
+                  </button>
+                </div>
+                <div class="mt-1">
+                  <button v-if="emp.card_uid" class="btn btn-outline-danger btn-sm" @click="handleUnlink(emp)">Unlink Card</button>
+                  <select
+                    v-else
+                    class="form-select form-select-sm d-inline-block"
+                    style="max-width: 170px;"
+                    @change="(e) => handleLink(emp, e.target.value)"
+                  >
                     <option value="">Link unassigned card…</option>
                     <option v-for="c in unassignedCards" :key="c.uid" :value="c.uid">
                       {{ c.uid }}
@@ -217,10 +190,21 @@ const handleUnlink = async (emp) => {
                 </div>
               </td>
             </tr>
+            <tr v-if="employeesList.length === 0">
+              <td colspan="7" class="text-center text-muted py-4">No employees registered yet.</td>
+            </tr>
           </tbody>
         </table>
       </div>
       <PaginationBar :page="page" :total-pages="totalPages" :total="allEmployees.length" :page-size="10" @prev="prev" @next="next" />
     </div>
+
+    <EmployeeFormModal
+      :show="modalShow"
+      :mode="modalMode"
+      :employee="editingEmployee"
+      @close="modalShow = false"
+      @saved="handleSaved"
+    />
   </div>
 </template>
