@@ -59,6 +59,13 @@ REST_FRAMEWORK = {
         "rest_framework.authentication.SessionAuthentication",
     ],
     "UNAUTHENTICATED_USER": None,
+    # Disabled: DRF's own ?format= query param (used to pick JSON vs the
+    # browsable API) collides with this project's *own* ?format=csv param
+    # on /api/reports/pdks (core/views.py PdksReportView) - with this on,
+    # DRF's content negotiation sees "csv", finds no renderer registered
+    # for it, and 404s before the view ever runs. Nothing else in this
+    # project relies on the ?format= override, so turning it off is safe.
+    "URL_FORMAT_OVERRIDE": None,
 }
 
 MIDDLEWARE = [
