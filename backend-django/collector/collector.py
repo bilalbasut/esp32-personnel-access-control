@@ -56,9 +56,9 @@ def handle_event(client, device_id, payload):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO devices (id, status, last_seen_at, fw)
-                VALUES (%s, 'online', %s, %s)
-                ON CONFLICT(id) DO UPDATE SET status = 'online', last_seen_at = EXCLUDED.last_seen_at, fw = EXCLUDED.fw
+                INSERT INTO devices (id, status, last_seen_at, fw, created_at, updated_at)
+                VALUES (%s, 'online', %s, %s, NOW(), NOW())
+                ON CONFLICT(id) DO UPDATE SET status = 'online', last_seen_at = EXCLUDED.last_seen_at, fw = EXCLUDED.fw, updated_at = NOW()
                 """,
                 (device_id, now, data.get("fw") or None),
             )
@@ -118,9 +118,9 @@ def handle_event(client, device_id, payload):
 def handle_status(device_id, payload):
     now = now_s()
     query = """
-        INSERT INTO devices (id, status, last_seen_at)
-        VALUES (%s, %s, %s)
-        ON CONFLICT(id) DO UPDATE SET status = EXCLUDED.status, last_seen_at = EXCLUDED.last_seen_at
+        INSERT INTO devices (id, status, last_seen_at, created_at, updated_at)
+        VALUES (%s, %s, %s, NOW(), NOW())
+        ON CONFLICT(id) DO UPDATE SET status = EXCLUDED.status, last_seen_at = EXCLUDED.last_seen_at, updated_at = NOW()
     """
     try:
         with conn.cursor() as cur:
@@ -143,15 +143,16 @@ def handle_heartbeat(device_id, payload):
     # before this device's first /status message doesn't just silently
     # touch zero rows and lose the data.
     query = """
-        INSERT INTO devices (id, status, last_seen_at, queue_depth, heap_free, queue_overflow, uptime_s)
-        VALUES (%s, 'online', %s, %s, %s, %s, %s)
+        INSERT INTO devices (id, status, last_seen_at, queue_depth, heap_free, queue_overflow, uptime_s, created_at, updated_at)
+        VALUES (%s, 'online', %s, %s, %s, %s, %s, NOW(), NOW())
         ON CONFLICT(id) DO UPDATE SET
             status = 'online',
             last_seen_at = EXCLUDED.last_seen_at,
             queue_depth = EXCLUDED.queue_depth,
             heap_free = EXCLUDED.heap_free,
             queue_overflow = EXCLUDED.queue_overflow,
-            uptime_s = EXCLUDED.uptime_s
+            uptime_s = EXCLUDED.uptime_s,
+            updated_at = NOW()
     """
     try:
         with conn.cursor() as cur:
@@ -181,13 +182,14 @@ def handle_cmd_res(device_id, payload):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO devices (id, status, last_seen_at, ota_status, ota_updated_at)
-                    VALUES (%s, 'online', %s, %s, %s)
+                    INSERT INTO devices (id, status, last_seen_at, ota_status, ota_updated_at, created_at, updated_at)
+                    VALUES (%s, 'online', %s, %s, %s, NOW(), NOW())
                     ON CONFLICT(id) DO UPDATE SET
                         status = 'online',
                         last_seen_at = EXCLUDED.last_seen_at,
                         ota_status = EXCLUDED.ota_status,
-                        ota_updated_at = EXCLUDED.ota_updated_at
+                        ota_updated_at = EXCLUDED.ota_updated_at,
+                        updated_at = NOW()
                     """,
                     (device_id, now, payload, now),
                 )

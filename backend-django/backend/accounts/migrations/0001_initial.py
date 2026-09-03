@@ -32,7 +32,7 @@ class Migration(migrations.Migration):
                 (
                     "username",
                     models.CharField(
-                        error_messages={"unique": "An operator with that username already exists."},
+                        error_messages={"unique": "A user with that username already exists."},
                         help_text="Required. 150 characters or fewer. Letters, digits and @/./+/-/_ only.",
                         max_length=150,
                         unique=True,
@@ -47,7 +47,7 @@ class Migration(migrations.Migration):
                     "is_staff",
                     models.BooleanField(
                         default=False,
-                        help_text="Designates whether the user can log into the Django admin site.",
+                        help_text="Designates whether the user can log into this admin site.",
                         verbose_name="staff status",
                     ),
                 ),
@@ -129,10 +129,10 @@ class Migration(migrations.Migration):
         ),
         migrations.AddIndex(
             model_name="auditlog",
-            index=models.Index(fields=["action"], name="audit_logs_action_idx"),
+            index=models.Index(fields=["action"], name="audit_logs_action_31f574_idx"),
         ),
         migrations.AddIndex(
             model_name="auditlog",
-            index=models.Index(fields=["created_at"], name="audit_logs_created_idx"),
+            index=models.Index(fields=["created_at"], name="audit_logs_created_262184_idx"),
         ),
     ]

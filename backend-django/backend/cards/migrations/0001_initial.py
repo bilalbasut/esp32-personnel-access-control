@@ -1,5 +1,6 @@
-from django.db import migrations, models
 import django.db.models.deletion
+import django.db.models.manager
+from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
@@ -24,6 +25,10 @@ class Migration(migrations.Migration):
                 ("phone", models.CharField(blank=True, max_length=30, null=True)),
             ],
             options={"db_table": "employees", "base_manager_name": "all_objects"},
+            managers=[
+                ("objects", django.db.models.manager.Manager()),
+                ("all_objects", django.db.models.manager.Manager()),
+            ],
         ),
         migrations.CreateModel(
             name="Card",
@@ -50,5 +55,9 @@ class Migration(migrations.Migration):
                 ),
             ],
             options={"db_table": "cards", "base_manager_name": "all_objects"},
+            managers=[
+                ("objects", django.db.models.manager.Manager()),
+                ("all_objects", django.db.models.manager.Manager()),
+            ],
         ),
     ]

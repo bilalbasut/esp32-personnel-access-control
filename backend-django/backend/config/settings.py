@@ -55,7 +55,7 @@ REST_FRAMEWORK = {
     # logs operators in - until then, request.user is Operator-or-None and
     # audit entries record "system" for anonymous requests.
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework.authtoken.authentication.TokenAuthentication",
+        "rest_framework.authentication.TokenAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
     "UNAUTHENTICATED_USER": None,
