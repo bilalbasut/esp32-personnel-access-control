@@ -1,5 +1,4 @@
 from django.db import IntegrityError, transaction
-from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -26,11 +25,11 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         log_action(self.request, "employee.update", f"Employee {employee.full_name} (#{employee.id})")
 
     def perform_destroy(self, instance):
-        # Soft delete - see SoftDeletableModel in core/models.py. Access
-        # events and card history that reference this employee stay
-        # explainable instead of pointing at a row that's simply gone.
-        instance.deleted_at = timezone.now()
-        instance.save(update_fields=["deleted_at"])
+        # instance.delete() soft-deletes - see SoftDeletableModel in
+        # core/models.py. Access events and card history that reference
+        # this employee stay explainable instead of pointing at a row
+        # that's simply gone.
+        instance.delete()
         log_action(self.request, "employee.delete", f"Employee {instance.full_name} (#{instance.id})")
 
 
@@ -73,14 +72,11 @@ class CardViewSet(viewsets.ModelViewSet):
         publish_acl_update()
 
     def perform_destroy(self, instance):
-        # Soft delete instead of a real DELETE - preserves the card's
-        # history for anything that still references its uid (access
-        # events, audit log). It disappears from normal listings via
-        # ActiveManager either way; is_active=False also keeps it out of
-        # the ACL buffer even before the manager filter would.
-        instance.is_active = False
-        instance.deleted_at = timezone.now()
-        instance.save(update_fields=["is_active", "deleted_at"])
+        # instance.delete() soft-deletes and also sets is_active=False (see
+        # Card.delete() in cards/models.py) - preserves the card's history
+        # for anything that still references its uid (access events, audit
+        # log), while immediately pulling it out of the ACL buffer.
+        instance.delete()
         log_action(self.request, "card.delete", f"Card {instance.uid}")
         publish_acl_update()
 

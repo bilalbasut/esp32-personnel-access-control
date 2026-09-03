@@ -41,9 +41,22 @@ class SoftDeletableModel(models.Model):
     `objects` (the default manager) excludes soft-deleted rows everywhere.
     `all_objects` is the explicit escape hatch for anything that genuinely
     needs to see everything - an admin "show removed" view, an export, a
-    debugging query. Ordinary `.delete()` still does a real hard delete if
-    called directly (Django/admin bulk-delete tooling expects that); use
-    `soft_delete()` for the normal "remove this" path.
+    debugging query.
+
+    `.delete()` itself soft-deletes - this is what closes the gap that used
+    to exist here: every call site (views, admin bulk-delete, a future
+    management command, a shell session) got soft-delete behavior "for
+    free" purely by being written correctly, with nothing stopping a real
+    DELETE FROM if one of them forgot. Now the model enforces it. Use
+    `hard_delete()` for an actual, permanent DELETE FROM (data cleanup, a
+    deliberate purge) - it's the explicit, harder-to-reach-for escape hatch,
+    on purpose.
+
+    No `update_fields` restriction on the save() below: a subclass that
+    overrides delete() to also flip another field first (see Card, which
+    deactivates itself so a deleted card stops granting access immediately
+    instead of waiting for something else to revoke it) needs the full
+    save() to persist that field too, not just deleted_at.
     """
     deleted_at = models.DateTimeField(null=True, blank=True)
 
@@ -53,13 +66,21 @@ class SoftDeletableModel(models.Model):
     class Meta:
         abstract = True
 
-    def soft_delete(self):
+    def delete(self, *args, **kwargs):
         self.deleted_at = timezone.now()
-        self.save(update_fields=["deleted_at"])
+        self.save()
+
+    def hard_delete(self, *args, **kwargs):
+        super().delete(*args, **kwargs)
+
+    def soft_delete(self):
+        """Explicit alias for delete() - same behavior, for call sites that
+        want to say "soft delete" out loud rather than just ".delete()"."""
+        self.delete()
 
     def restore(self):
         self.deleted_at = None
-        self.save(update_fields=["deleted_at"])
+        self.save()
 
     @property
     def is_deleted(self):

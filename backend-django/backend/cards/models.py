@@ -41,3 +41,11 @@ class Card(TimestampedModel, ActivatableModel, SoftDeletableModel):
     class Meta:
         db_table = "cards"
         base_manager_name = "all_objects"  # see Employee.Meta for why
+
+    def delete(self, *args, **kwargs):
+        # is_active drives the live ACL binary buffer (core/acl.py only
+        # includes cards where is_active=True) - a deleted card must stop
+        # granting access immediately, not just disappear from listings
+        # once its deleted_at happens to get noticed.
+        self.is_active = False
+        super().delete(*args, **kwargs)
