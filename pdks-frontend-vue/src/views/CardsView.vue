@@ -92,7 +92,7 @@ const handleRevoke = async (uid) => {
 const handleReactivate = async (card) => {
   try {
     const empId = card.employee?.id ?? card.employee_id ?? null;
-    await api.assignCard(card.uid, empId, 1);
+    await api.assignCard(card.uid, empId, true);
     setFeedback(`Card ${card.uid} reactivated.`);
     refresh();
   } catch (err) {
@@ -135,7 +135,7 @@ const handleDelete = async (uid) => {
             <label class="form-label small mb-0 fw-semibold">Holder</label>
             <select class="form-select" v-model="newCard.employee_id">
               <option value="">— Unassigned (Inventory) —</option>
-              <option v-for="emp in employeesList" :key="emp.id" :value="emp.id">{{ emp.ad_soyad }}</option>
+              <option v-for="emp in employeesList" :key="emp.id" :value="emp.id">{{ emp.full_name }}</option>
             </select>
           </div>
           <div class="col-md-2">
@@ -182,19 +182,20 @@ const handleDelete = async (uid) => {
           <tbody>
             <tr v-for="card in pagedCards" :key="card.uid">
               <td><code class="fw-bold text-dark fs-6">{{ card.uid }}</code></td>
-              <!-- Fix: Access nested employee name -->
-              <td>{{ card.employee?.ad_soyad || card.ad_soyad || 'Unassigned' }}</td>
+              <!-- Access nested employee name (CardSerializer's employee_id is
+                   write-only, so the read side is only ever card.employee) -->
+              <td>{{ card.employee?.full_name || 'Unassigned' }}</td>
               <td><span class="badge bg-light text-dark border">{{ card.floors || 'None' }}</span></td>
               <td class="small">{{ minutesToHHMM(card.win_start_m) }} – {{ minutesToHHMM(card.win_end_m) }}</td>
               <td class="small text-muted">{{ formatDateTime(card.valid_to) }}</td>
               <td>
-                <span class="badge" :class="Number(card.aktif) === 1 ? 'bg-success' : 'bg-secondary'">
-                  {{ Number(card.aktif) === 1 ? 'Active' : 'Revoked' }}
+                <span class="badge" :class="card.is_active ? 'bg-success' : 'bg-secondary'">
+                  {{ card.is_active ? 'Active' : 'Revoked' }}
                 </span>
               </td>
               <td class="text-end">
                 <div class="btn-group btn-group-sm">
-                  <button v-if="Number(card.aktif) === 1" class="btn btn-outline-warning" @click="handleRevoke(card.uid)">Revoke</button>
+                  <button v-if="card.is_active" class="btn btn-outline-warning" @click="handleRevoke(card.uid)">Revoke</button>
                   <button v-else class="btn btn-outline-success" @click="handleReactivate(card)">Activate</button>
                   <button class="btn btn-outline-danger" @click="handleDelete(card.uid)">Delete</button>
                 </div>

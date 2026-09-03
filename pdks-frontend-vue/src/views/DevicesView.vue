@@ -125,9 +125,9 @@ const triggerOta = async (devId) => {
               <td>
                 <span
                   class="badge"
-                  :class="isDeviceOnline(dev.son_gorulme, nowSec) ? 'bg-success' : 'bg-secondary'"
+                  :class="isDeviceOnline(dev.last_seen_at, nowSec) ? 'bg-success' : 'bg-secondary'"
                 >
-                  {{ isDeviceOnline(dev.son_gorulme, nowSec) ? 'Online' : 'Offline' }}
+                  {{ isDeviceOnline(dev.last_seen_at, nowSec) ? 'Online' : 'Offline' }}
                 </span>
               </td>
 
@@ -150,7 +150,7 @@ const triggerOta = async (devId) => {
 
               <!-- Last Seen -->
               <td class="small text-muted">
-                {{ formatDateTime(dev.son_gorulme) }}
+                {{ formatDateTime(dev.last_seen_at) }}
               </td>
 
               <!-- OTA Selector -->
@@ -165,7 +165,7 @@ const triggerOta = async (devId) => {
                   <button
                     class="btn btn-outline-primary"
                     type="button"
-                    :disabled="!isDeviceOnline(dev.son_gorulme, nowSec) || !selectedFw[dev.id]"
+                    :disabled="!isDeviceOnline(dev.last_seen_at, nowSec) || !selectedFw[dev.id]"
                     @click="triggerOta(dev.id)"
                   >
                     OTA
@@ -178,21 +178,21 @@ const triggerOta = async (devId) => {
                 <div class="btn-group btn-group-sm">
                   <button
                     class="btn btn-outline-success"
-                    :disabled="!isDeviceOnline(dev.son_gorulme, nowSec)"
+                    :disabled="!isDeviceOnline(dev.last_seen_at, nowSec)"
                     @click="sendCommand(dev.id, 'open')"
                   >
                     Open Door
                   </button>
                   <button
                     class="btn btn-outline-secondary"
-                    :disabled="!isDeviceOnline(dev.son_gorulme, nowSec)"
+                    :disabled="!isDeviceOnline(dev.last_seen_at, nowSec)"
                     @click="sendCommand(dev.id, 'sync')"
                   >
                     Sync ACL
                   </button>
                   <button
                     class="btn btn-outline-danger"
-                    :disabled="!isDeviceOnline(dev.son_gorulme, nowSec)"
+                    :disabled="!isDeviceOnline(dev.last_seen_at, nowSec)"
                     @click="sendCommand(dev.id, 'reboot')"
                   >
                     Reboot

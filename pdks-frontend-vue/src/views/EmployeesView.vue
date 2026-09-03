@@ -1,7 +1,8 @@
 <script setup>
-import { ref, computed, watch } from 'vue';
+import { computed, ref } from 'vue';
 import { api } from '../api';
 import { usePolling } from '../composables/usePolling';
+import { usePagination } from '../composables/usePagination';
 import PaginationBar from '../components/PaginationBar.vue';
 
 // 1. Fetch employees and cards simultaneously
@@ -35,48 +36,21 @@ const allEmployees = computed(() => {
   });
 });
 
-// 3. Pagination state and calculations expected by line 193
-const page = ref(1);
-const pageSize = ref(10);
+// 3. Pagination - shared composable (same one CardsView uses), rather than
+// a hand-rolled copy of the same page/totalPages/prev/next logic.
+const { page, totalPages, pageItems: employeesList, next, prev } = usePagination(allEmployees, 10);
 
-const totalPages = computed(() => {
-  const count = Math.ceil(allEmployees.value.length / pageSize.value);
-  return count > 0 ? count : 1;
-});
-
-// Auto-adjust page if list shrinks
-watch(totalPages, (newTotal) => {
-  if (page.value > newTotal) {
-    page.value = newTotal;
-  }
-});
-
-const prev = () => {
-  if (page.value > 1) page.value--;
-};
-
-const next = () => {
-  if (page.value < totalPages.value) page.value++;
-};
-
-const setPage = (p) => {
-  if (p >= 1 && p <= totalPages.value) page.value = p;
-};
-
-// Paginated slice passed to the table
-const employeesList = computed(() => {
-  const start = (page.value - 1) * pageSize.value;
-  return allEmployees.value.slice(start, start + pageSize.value);
-});
-
-// Alias in case any template section binds directly to employeesWithCards
-const employeesWithCards = allEmployees;
+// Cards with no employee attached yet - CardSerializer's employee_id is
+// write-only (cards/serializers.py), so it's never present on a GET
+// response; the nested `employee` object (null when unassigned) is the
+// only reliable signal here.
+const unassignedCards = computed(() => (data.value?.cards || []).filter((c) => !c.employee));
 
 // 4. Form handling
-const addForm = ref({ ad_soyad: '', departman: '' });
+const addForm = ref({ full_name: '', department: '' });
 const onboardForm = ref({
-  ad_soyad: '',
-  departman: '',
+  full_name: '',
+  department: '',
   uid: '',
   floors: '1,2,3',
   win_start_m: 0,
@@ -94,8 +68,8 @@ const setFeedback = (msg, type = 'success') => {
 const handleAddEmployee = async () => {
   try {
     await api.addEmployee(addForm.value);
-    setFeedback(`Employee ${addForm.value.ad_soyad} created.`);
-    addForm.value = { ad_soyad: '', departman: '' };
+    setFeedback(`Employee ${addForm.value.full_name} created.`);
+    addForm.value = { full_name: '', department: '' };
     refresh();
   } catch (err) {
     setFeedback(err.message, 'danger');
@@ -111,16 +85,39 @@ const handleOnboard = async () => {
     };
     await api.addCardWithEmployee(payload);
     setFeedback(
-      `Onboarded ${onboardForm.value.ad_soyad} with Card ${onboardForm.value.uid}. Hardware synced.`
+      `Onboarded ${onboardForm.value.full_name} with Card ${onboardForm.value.uid}. Hardware synced.`
     );
     onboardForm.value = {
-      ad_soyad: '',
-      departman: '',
+      full_name: '',
+      department: '',
       uid: '',
       floors: '1,2,3',
       win_start_m: 0,
       win_end_m: 1440,
     };
+    refresh();
+  } catch (err) {
+    setFeedback(err.message, 'danger');
+  }
+};
+
+const handleLink = async (emp, uid) => {
+  if (!uid) return;
+  try {
+    await api.assignCard(uid, emp.id, true);
+    setFeedback(`Card ${uid} linked to ${emp.full_name}.`);
+    refresh();
+  } catch (err) {
+    setFeedback(err.message, 'danger');
+  }
+};
+
+const handleUnlink = async (emp) => {
+  if (!emp.card_uid) return;
+  if (!confirm(`Unlink card ${emp.card_uid} from ${emp.full_name}?`)) return;
+  try {
+    await api.assignCard(emp.card_uid, null);
+    setFeedback(`Card ${emp.card_uid} unlinked from ${emp.full_name}.`);
     refresh();
   } catch (err) {
     setFeedback(err.message, 'danger');
@@ -146,10 +143,10 @@ const handleOnboard = async () => {
           <div class="card-body">
             <form @submit.prevent="handleAddEmployee">
               <div class="mb-2">
-                <input class="form-control" placeholder="Full Name" v-model="addForm.ad_soyad" required />
+                <input class="form-control" placeholder="Full Name" v-model="addForm.full_name" required />
               </div>
               <div class="mb-2">
-                <input class="form-control" placeholder="Department (e.g. Engineering)" v-model="addForm.departman" />
+                <input class="form-control" placeholder="Department (e.g. Engineering)" v-model="addForm.department" />
               </div>
               <button type="submit" class="btn btn-outline-dark w-100 btn-sm">Create Profile</button>
             </form>
@@ -163,10 +160,10 @@ const handleOnboard = async () => {
           <div class="card-body">
             <form @submit.prevent="handleOnboard" class="row g-2">
               <div class="col-md-6">
-                <input class="form-control form-control-sm" placeholder="Full Name" v-model="onboardForm.ad_soyad" required />
+                <input class="form-control form-control-sm" placeholder="Full Name" v-model="onboardForm.full_name" required />
               </div>
               <div class="col-md-6">
-                <input class="form-control form-control-sm" placeholder="Department" v-model="onboardForm.departman" />
+                <input class="form-control form-control-sm" placeholder="Department" v-model="onboardForm.department" />
               </div>
               <div class="col-md-6">
                 <input class="form-control form-control-sm font-monospace" placeholder="Card UID (HEX)" v-model="onboardForm.uid" required />
@@ -186,7 +183,7 @@ const handleOnboard = async () => {
     <!-- Employee Table -->
     <div class="card shadow-sm">
       <div class="card-header bg-white py-3">
-        <h6 class="m-0 fw-bold">Active Employees ({{ employeesList.length }})</h6>
+        <h6 class="m-0 fw-bold">Active Employees ({{ allEmployees.length }})</h6>
       </div>
       <div class="table-responsive">
         <table class="table table-hover align-middle mb-0">
@@ -200,10 +197,10 @@ const handleOnboard = async () => {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="emp in employeesWithCards" :key="emp.id">
+            <tr v-for="emp in employeesList" :key="emp.id">
               <td>#{{ emp.id }}</td>
-              <td class="fw-semibold">{{ emp.ad_soyad }}</td>
-              <td>{{ emp.departman || '—' }}</td>
+              <td class="fw-semibold">{{ emp.full_name }}</td>
+              <td>{{ emp.department || '—' }}</td>
               <td>
                 <span v-if="emp.card_uid" class="font-monospace fw-bold">{{ emp.card_uid }}</span>
                 <span v-else class="text-muted small">No card assigned</span>
@@ -213,7 +210,7 @@ const handleOnboard = async () => {
                 <div v-else class="d-inline-flex gap-1">
                   <select class="form-select form-select-sm" style="max-width: 170px;" @change="(e) => handleLink(emp, e.target.value)">
                     <option value="">Link unassigned card…</option>
-                    <option v-for="c in (data.cards || []).filter(c => !c.employee_id)" :key="c.uid" :value="c.uid">
+                    <option v-for="c in unassignedCards" :key="c.uid" :value="c.uid">
                       {{ c.uid }}
                     </option>
                   </select>
@@ -223,7 +220,7 @@ const handleOnboard = async () => {
           </tbody>
         </table>
       </div>
-      <PaginationBar :page="page" :total-pages="totalPages" :total="employeesList.length" :page-size="10" @prev="prev" @next="next" />
+      <PaginationBar :page="page" :total-pages="totalPages" :total="allEmployees.length" :page-size="10" @prev="prev" @next="next" />
     </div>
   </div>
 </template>

@@ -57,16 +57,28 @@ const events = computed(() => {
 
 // Device online calculations
 const onlineCount = computed(() => {
-  return devices.value.filter((d) => isDeviceOnline(d.son_gorulme, nowSec.value)).length;
+  return devices.value.filter((d) => isDeviceOnline(d.last_seen_at, nowSec.value)).length;
 });
+
+// Europe/Istanbul calendar-day key (YYYY-MM-DD), matching the backend's own
+// REPORT_TZ convention (core/views.py PdksReportView) so "today" here means
+// the same thing it means in the PDKS report.
+const istanbulDayKey = (epochSec) => {
+  if (!epochSec) return null;
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Istanbul' }).format(
+    new Date(Number(epochSec) * 1000)
+  );
+};
 
 // KPIs required by the template cards
 const kpis = computed(() => {
   const totalEmployees = employees.value.length;
   const totalCards = cards.value.length;
-  const activeCards = cards.value.filter((c) => c.aktif === 1 || c.aktif === true).length;
+  const activeCards = cards.value.filter((c) => c.is_active).length;
   const onlineDevices = onlineCount.value;
   const totalDevices = devices.value.length;
+  const todayKey = istanbulDayKey(nowSec.value);
+  const scansToday = events.value.filter((ev) => istanbulDayKey(ev.ts_utc) === todayKey).length;
 
   return {
     total_employees: totalEmployees,
@@ -74,6 +86,7 @@ const kpis = computed(() => {
     active_cards: activeCards,
     online_devices: onlineDevices,
     total_devices: totalDevices,
+    scans_today: scansToday,
   };
 });
 </script>
@@ -153,7 +166,7 @@ const kpis = computed(() => {
                 <span class="badge" :class="ev.dir === 0 ? 'bg-primary' : 'bg-secondary'">{{ formatDirection(ev.dir) }}</span>
               </td>
               <td><span class="font-monospace fw-semibold">{{ ev.device_id }}</span></td>
-              <td>{{ ev.ad_soyad || '—' }}</td>
+              <td>{{ ev.full_name || '—' }}</td>
               <td><code class="text-dark">{{ ev.uid }}</code></td>
               <td>
                 <span class="badge" :class="`bg-${resultLabel(ev.result).variant}`">{{ resultLabel(ev.result).text }}</span>

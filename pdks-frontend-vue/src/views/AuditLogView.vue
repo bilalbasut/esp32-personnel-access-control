@@ -77,7 +77,7 @@ const auditEvents = computed(() => {
               <td class="font-monospace small">{{ formatDateTime(ev.ts_utc) }}</td>
               <td><span class="badge bg-light text-dark border">{{ ev.device_id }}</span></td>
               <td><code class="fw-bold text-dark">{{ ev.uid }}</code></td>
-              <td>{{ ev.ad_soyad || 'Unidentified' }}</td>
+              <td>{{ ev.full_name || 'Unidentified' }}</td>
               <td>
                 <span class="badge" :class="`bg-${resultLabel(ev.result).variant}`">{{ resultLabel(ev.result).text }}</span>
               </td>

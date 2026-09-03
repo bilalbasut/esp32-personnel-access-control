@@ -68,15 +68,15 @@ export function hhmmToMinutes(hhmm) {
 // determines if gate unit is online based on heartbeat threshold (45s)
 // src/utils/format.js
 
-export function isDeviceOnline(son_gorulme, nowSec = null, thresholdSec = 90) {
-  if (!son_gorulme) return false;
+export function isDeviceOnline(lastSeenEpoch, nowSec = null, thresholdSec = 90) {
+  if (!lastSeenEpoch) return false;
 
   // If nowSec is omitted or undefined, fallback to current UTC epoch seconds
   const currentSec = (nowSec !== null && nowSec !== undefined && !isNaN(nowSec))
     ? Number(nowSec)
     : Math.floor(Date.now() / 1000);
 
-  let lastSeen = Number(son_gorulme);
+  let lastSeen = Number(lastSeenEpoch);
   if (isNaN(lastSeen) || lastSeen <= 0) return false;
 
   // Auto-detect if timestamp was provided in milliseconds

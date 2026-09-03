@@ -77,12 +77,15 @@ export const api = {
       method: 'POST',
       body: data,
     }),
-  assignCard: (uid, employeeId, aktif = undefined) =>
+  assignCard: (uid, employeeId, isActive = undefined) =>
     request(`/api/cards/${encodeURIComponent(uid)}/assign`, {
       method: 'PUT',
       body: {
         employee_id: employeeId !== null && employeeId !== '' ? Number(employeeId) : null,
-        ...(aktif !== undefined && { aktif }),
+        // Matches CardAssignSerializer's actual field name (cards/serializers.py) -
+        // sending "aktif" here was a silently-ignored no-op: DRF drops unknown
+        // input keys, so an explicit active/inactive override never reached the DB.
+        ...(isActive !== undefined && { is_active: isActive }),
       },
     }),
   revokeCard: (uid) =>

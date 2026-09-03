@@ -14,7 +14,8 @@ const error = ref(null);
 
 onMounted(async () => {
   try {
-    employees.value = await api.getEmployees();
+    const res = await api.getEmployees();
+    employees.value = Array.isArray(res) ? res : (res?.results || []);
   } catch (err) {
     console.error(err);
   }
@@ -44,7 +45,7 @@ const runReport = async () => {
 };
 
 const exportCsv = () => {
-  window.open(api.pdksCsvUrl(getEpochRange()), '_blank');
+  window.open(api.getPdksReportCsvUrl(getEpochRange()), '_blank');
 };
 </script>
 
@@ -71,7 +72,7 @@ const exportCsv = () => {
             <label class="form-label small mb-0 fw-semibold">Staff Filter</label>
             <select class="form-select" v-model="employeeId">
               <option value="">All Personnel</option>
-              <option v-for="emp in employees" :key="emp.id" :value="emp.id">{{ emp.ad_soyad }}</option>
+              <option v-for="emp in employees" :key="emp.id" :value="emp.id">{{ emp.full_name }}</option>
             </select>
           </div>
           <div class="col-md-3 d-flex gap-2">
@@ -113,8 +114,8 @@ const exportCsv = () => {
             </tr>
             <tr v-for="(r, idx) in rows" :key="idx">
               <td>{{ r.working_date }}</td>
-              <td class="fw-semibold">{{ r.ad_soyad }}</td>
-              <td>{{ r.departman || '—' }}</td>
+              <td class="fw-semibold">{{ r.full_name }}</td>
+              <td>{{ r.department || '—' }}</td>
               <td class="font-monospace small">{{ formatTimeOnly(r.first_in_main) }}</td>
               <td class="font-monospace small">{{ formatTimeOnly(r.last_out_main) }}</td>
               <td><span class="badge bg-primary fs-6">{{ formatDuration(r.total_work_seconds) }}</span></td>
