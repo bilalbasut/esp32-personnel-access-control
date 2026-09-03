@@ -5,7 +5,11 @@
 // ============================================================
 // 1. CONFIGURATION
 // ============================================================
-#define FW_VERSION "1.9.5"
+// Not: DEVICE_ID, FLOOR_NUMBER, DEVICE_DIR ve aşağıdaki MQTT topic'leri bu
+// build'e sabit (compile-time) - yani her fiziksel kapı okuyucusu kendi
+// DEVICE_ID/DIR değerleriyle ayrı derlenip flaşlanıyor. Aynı ikili (binary)
+// birden fazla cihaza yüklenemez.
+#define FW_VERSION "2.0.1"
 #define DEVICE_ID "GATE-K3-01"
 #define FLOOR_NUMBER 3
 #define DEVICE_DIR DIR_IN // Options: DIR_IN (0) or DIR_OUT (1)
@@ -38,7 +42,7 @@
 #define RELAY_DURATION_MS       3000UL
 #define SUCCESS_BEEP_MS          250UL
 #define DENY_STEP_MS             150UL
-#define RFID_DEBOUNCE_MS        5000UL
+#define RFID_DEBOUNCE_MS        5000UL // aynı UID'nin okuyucu üzerinde bekletilmesi/tekrar okunması tek olay saysın diye
 #define EXIT_DEBOUNCE_MS          50UL
 #define HEARTBEAT_INTERVAL_MS  30000UL
 #define NTP_SYNC_INTERVAL_MS 3600000UL

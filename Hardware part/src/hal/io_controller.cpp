@@ -56,6 +56,10 @@ void IOController::denyAccess() {
     digitalWrite(BUZZER_PIN, HIGH);
 }
 
+// Röle/buzzer/LED zamanlaması burada delay() ile değil, millis() farkına
+// bakan bir state machine ile ilerliyor. Sebep: bu fonksiyon loop() (core 1)
+// içinden her turda çağrılıyor ve RFID okuma ile exit butonu da aynı loop'ta
+// - birkaç saniyelik bir delay() burada RFID okumasını/watchdog'u kilitler.
 void IOController::update() {
     const unsigned long now = millis();
     if (isRelayActive && now - relayStartTime >= RELAY_DURATION_MS) {
@@ -93,6 +97,10 @@ void IOController::handleExitButton() {
         if (reading != stableExitButtonState) {
             stableExitButtonState = reading;
             if (stableExitButtonState == LOW && !isRelayActive) {
+                // Çıkış butonuna basmak kart okutmadan kapıyı açıyor, bu yüzden
+                // gerçek bir UID yok - all-zero UID + RESULT_MANUAL, bu olayı
+                // loglarda/backend'de "birisi kart okuttu" olaylarından ayırt
+                // etmek için kullanılıyor (bkz. collector.py MAP_RESULT["manual"]).
                 static const uint8_t zeroUid[7] = {0};
                 DateTime now = RTCService::rtcNowSafe();
                 if (EventQueue::logAccess(now, zeroUid, 7, DEVICE_DIR, RESULT_MANUAL)) {

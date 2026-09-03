@@ -1,5 +1,10 @@
 #include "network/ota_guard.h"
 
+// Bu sınıf, hatalı bir OTA push'unun sahadaki kapı okuyucularını kalıcı
+// olarak "tuğlaya" (brick) çevirmesini engelliyor. Kısaca Eğer ESP32 OTA ile
+// güncellenirse ve yeni versiyon kısa sürede Mqtt'ye bağlanamazsa
+// bir önceki sürüme geri döndürüyor.
+
 const esp_partition_t* OtaGuard::s_running_partition = nullptr;
 bool OtaGuard::s_is_pending_verify = false;
 bool OtaGuard::s_verified = false;

@@ -38,6 +38,12 @@ bool EventQueue::readEventRecord(uint32_t index, AccessRecord& record) {
     return readBytes == sizeof(record);
 }
 
+// Kuyruk dolarsa (MAX_EVENTS'e ulaştıysa) en eski kayıt silinmeden üzerine
+// yazılır - yani backend uzun süre erişilemez olursa cihaz yeni event'leri
+// reddetmek yerine en eski geçmişi feda ediyor (en güncel olay her zaman
+// tercih ediliyor). Bu bir kapasite/politika kararı, kayıp sessizce olmasın
+// diye queueOverflowCount sayaç tutuluyor ve heartbeat ile backend'e
+// bildiriliyor (bkz. NetworkManager heartbeat "qOverflow").
 static bool evictOldestIfFull() {
     bool wasFull = false;
     portENTER_CRITICAL(&queueMux);
@@ -49,6 +55,13 @@ static bool evictOldestIfFull() {
     return wasFull;
 }
 
+// read/write pointer'lar ve queueCount her event'te değil, periyodik olarak
+// (CHECKPOINT_EVENT_INTERVAL / CHECKPOINT_ACK_INTERVAL) Preferences'e
+// yazılıyor (flash aşınmasını/performansı düşünerek). Yani açılışta bu
+// checkpoint, son birkaç event'i yansıtmıyor olabilir - bu fonksiyon
+// /events.bin dosyasının tamamını tarayıp geçerli (CRC'si tutan) kayıtlardan
+// gerçek write pointer'ı ve en yüksek seq'i yeniden hesaplıyor, böylece
+// checkpoint eski kalmış olsa bile kuyruk tutarlı hale geliyor.
 static void rebuildQueueState() {
     uint32_t newestSeq = 0;
     int newestIndex = -1;
@@ -131,11 +144,6 @@ void EventQueue::saveCheckpoint(bool force) {
     preferences.putUInt("writePtr", writePointer);
     preferences.putUInt("qCount", queueCount);
     preferences.putUInt("seq", globalSequence);
-    // aclVer is intentionally NOT written here - ACLEngine owns that key
-    // exclusively via its own Preferences handle (see ACLEngine::init(),
-    // ::resetVersion(), ::processACLUpdate()). Writing it from here too was
-    // redundant (same namespace, same key, two handles) and never the
-    // source of truth - EventQueue never reads it back.
     eventsSinceCheckpoint = 0; acksSinceCheckpoint = 0;
 }
 

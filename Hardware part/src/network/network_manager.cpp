@@ -25,6 +25,34 @@ static volatile bool rebootPending = false;
 static unsigned long rebootRequestedAt = 0;
 static uint32_t lastCmdSeq = 0;
 
+// mqttCallback() ARTIK mqtt.publish()/mqtt.subscribe() çağırmıyor - onun yerine
+// burada kuyruğa yazıyor, gerçek gönderim mqtt.loop() döngüden tamamen
+// döndükten SONRA (taskLoop içinde) yapılıyor. Sebep: 256dpi/arduino-mqtt
+// kütüphanesinin kendi README'si callback içeriden publish/subscribe/unsubscribe
+// çağrılmasını AÇIKÇA yasaklıyor ("may cause deadlocks when other things
+// arrive while sending and receiving acknowledgments"). Bunu görmezden
+// gelmek üretimde görülen "GATE-K3-01 online/offline flap + aynı OTA
+// komutu (seq) sonsuz tekrar" sorununun kök nedeniydi: callback içinde
+// publish etmek MQTT bağlantı durumunu bozup broker'ın bağlantıyı
+// kesmesine yol açıyordu (LWT -> "offline"); setOptions() ile clean
+// session=false olduğundan (bkz. initMQTT), broker henüz PUBACK
+// alamadığı QoS1 komutu her reconnect'te tekrar tekrar gönderiyordu -
+// cihaz duplicate'i reddedip tekrar publish edince döngü kendini
+// besliyordu. 3 slotluk kuyruk, OTA gibi tek bir komutun iki ayrı
+// cevap üretebildiği (örn. "ota_downloading" sonra "ota_ok_rebooting")
+// durumları kaybetmemek için var.
+static const uint8_t CMD_RES_QUEUE_LEN = 3;
+static char pendingCmdResQueue[CMD_RES_QUEUE_LEN][32];
+static volatile uint8_t pendingCmdResCount = 0;
+static volatile bool pendingAclResubscribe = false;
+
+static void queueCmdRes(const char* msg) {
+    if (pendingCmdResCount >= CMD_RES_QUEUE_LEN) return; // taşarsa fazlasını sessizce düşür
+    strncpy(pendingCmdResQueue[pendingCmdResCount], msg, sizeof(pendingCmdResQueue[0]) - 1);
+    pendingCmdResQueue[pendingCmdResCount][sizeof(pendingCmdResQueue[0]) - 1] = '\0';
+    pendingCmdResCount++;
+}
+
 static volatile bool ackReceived = false;
 static volatile uint32_t pendingAckSeq = 0;
 static volatile bool aclMessageReceived = false;
@@ -80,7 +108,7 @@ static void mqttCallback(MQTTClient *client, char topic[], char bytes[], int len
             JsonDocument cmdDoc;
             if (deserializeJson(cmdDoc, payload)) {
                 Serial.println("Invalid command JSON.");
-                mqtt.publish(TOPIC_CMD_RES, "cmd_failed_bad_json", false, 1);
+                queueCmdRes("cmd_failed_bad_json");
                 return;
             }
 
@@ -88,17 +116,25 @@ static void mqttCallback(MQTTClient *client, char topic[], char bytes[], int len
             const char* subCmd = cmdDoc["cmd"] | "";
             uint32_t cmdTs = cmdDoc["ts"] | 0UL;
 
+            // MQTT QoS1 aynı mesajı birden fazla teslim edebilir - seq ile
+            // "bu komutu zaten işledik" tekrarlarını eleyip aynı "open"/
+            // "reboot" komutunun iki kez uygulanmasını önlüyoruz.
             if (seq <= lastCmdSeq && seq != 0) {
                 Serial.printf("Duplicate command seq=%u ignored.\n", seq);
-                mqtt.publish(TOPIC_CMD_RES, "cmd_duplicate_ignored", false, 1);
+                queueCmdRes("cmd_duplicate_ignored");
                 return;
             }
 
+            // Komut 15 saniyeden daha eski gönderilmişse (ağ gecikmesi, broker
+            // tarafında bekleyen retained mesaj vb.) uygulanmıyor - özellikle
+            // "open" gibi komutların çok sonra gelip beklenmedik anda kapıyı
+            // açması istenmiyor. RTC zaten güvenilmezse (TSRC_INVALID) bu
+            // kontrol tamamen atlanıyor, çünkü now.unixtime() kendisi şüpheli.
             DateTime now = RTCService::rtcNowSafe();
             if (RTCService::currentTimeSource != TSRC_INVALID && cmdTs > 0) {
                 if (now.unixtime() > (cmdTs + 15)) {
                     Serial.printf("Expired command '%s' discarded.\n", subCmd);
-                    mqtt.publish(TOPIC_CMD_RES, "cmd_expired_discarded", false, 1);
+                    queueCmdRes("cmd_expired_discarded");
                     lastCmdSeq = seq;
                     return;
                 }
@@ -110,18 +146,18 @@ static void mqttCallback(MQTTClient *client, char topic[], char bytes[], int len
                 static const uint8_t remoteUid[7] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
                 bool logged = EventQueue::logAccess(now, remoteUid, 7, DIR_IN, RESULT_MANUAL);
                 IOController::grantAccess();
-                mqtt.publish(TOPIC_CMD_RES, logged ? "open_ok" : "open_ok_unlogged", false, 1);
+                queueCmdRes(logged ? "open_ok" : "open_ok_unlogged");
                 if (!logged) Serial.println("WARNING: Remote open succeeded but event logging failed.");
 
             } else if (strcmp(subCmd, "reboot") == 0) {
-                mqtt.publish(TOPIC_CMD_RES, "rebooting", false, 1);
+                queueCmdRes("rebooting");
                 rebootPending = true;
                 rebootRequestedAt = millis();
 
             } else if (strcmp(subCmd, "sync") == 0) {
                 ACLEngine::resetVersion();
-                mqtt.subscribe(TOPIC_ACL, 1);
-                mqtt.publish(TOPIC_CMD_RES, "sync_triggered", false, 1);
+                pendingAclResubscribe = true;
+                queueCmdRes("sync_triggered");
 
             } else if (strcmp(subCmd, "settime") == 0) {
                 uint32_t newTs = cmdDoc["ts"] | 0UL;
@@ -129,10 +165,10 @@ static void mqttCallback(MQTTClient *client, char topic[], char bytes[], int len
                     RTCService::rtcAdjustSafe(DateTime(newTs));
                     RTCService::currentTimeSource = TSRC_RTC;
                     RTCService::lastNtpSync = millis();
-                    mqtt.publish(TOPIC_CMD_RES, "settime_ok", false, 1);
+                    queueCmdRes("settime_ok");
                     Serial.printf("RTC time updated via backend command to: %lu\n", newTs);
                 } else {
-                    mqtt.publish(TOPIC_CMD_RES, "settime_failed_invalid_ts", false, 1);
+                    queueCmdRes("settime_failed_invalid_ts");
                 }
 
             } else if (strcmp(subCmd, "ota") == 0) {
@@ -141,19 +177,30 @@ static void mqttCallback(MQTTClient *client, char topic[], char bytes[], int len
                 uint32_t otaSize = cmdDoc["size"] | 0UL;
 
                 if (otaUrl.length() == 0 || otaMd5.length() != 32) {
-                    mqtt.publish(TOPIC_CMD_RES, "ota_failed_bad_request", false, 1);
+                    queueCmdRes("ota_failed_bad_request");
                     return;
                 }
 
-                mqtt.publish(TOPIC_CMD_RES, "ota_downloading", false, 1);
+                // NOT: "ota_downloading" burada kuyruğa giriyor ama gerçekten
+                // gönderilmesi - kuyruk sadece mqtt.loop() döndükten sonra
+                // boşaltıldığı için - performOTA() (aşağıda, bloklayan bir HTTP
+                // indirmesi) bitene kadar ERTELENİYOR; yani panel artık indirme
+                // SIRASINDA "downloading" durumunu gerçek zamanlı göremiyor,
+                // indirme bitince "downloading" ve final sonuç (ok/failed) art
+                // arda gelecek. Bu, publish-in-callback bug'ını çözmenin kabul
+                // edilen bir yan etkisi - gerçek zamanlı ara durum istenirse
+                // OTA tetiklemesinin tamamen ana loop'a taşınması gerekir
+                // (reboot'ta olduğu gibi bir pendingOta bayrağıyla) - şimdilik
+                // kapsam dışı bırakıldı.
+                queueCmdRes("ota_downloading");
                 bool ok = OTAUpdater::performOTA(otaUrl, otaMd5, otaSize);
 
                 if (ok) {
-                    mqtt.publish(TOPIC_CMD_RES, "ota_ok_rebooting", false, 1);
+                    queueCmdRes("ota_ok_rebooting");
                     rebootPending = true;
                     rebootRequestedAt = millis();
                 } else {
-                    mqtt.publish(TOPIC_CMD_RES, "ota_failed", false, 1);
+                    queueCmdRes("ota_failed");
                 }
             }
         }
@@ -167,6 +214,15 @@ static void initMQTT() {
     mqtt.setWill(TOPIC_STATUS, "offline", true, 1);
 }
 
+// --- Store-and-forward: basit "stop-and-wait" mantığı ---
+// EventQueue'daki en eski (henüz backend'e ulaşmamış) kayıt tek tek
+// publishQueueHead() ile gönderilir; collector.py bunu işleyip ack_seq
+// döndürene kadar (processPendingAck) kuyruktan bir sonrakine geçilmez.
+// MQTT'nin kendi QoS1 ack'i sadece broker'a ulaştığını garanti eder,
+// collector'ın DB'ye yazdığını değil - asıl "kabul edildi" sinyali bu
+// uygulama seviyesindeki ack_seq mesajı. Ack gelmezse ACK_TIMEOUT_MS sonra
+// pes edilip aynı kayıt tekrar denenir (collector tarafı zaten
+// device_id+seq üzerinde UNIQUE constraint ile tekrarları güvenle yutuyor).
 static bool processPendingAck(bool currentlyWaiting) {
     if (!currentlyWaiting || !ackReceived) return currentlyWaiting;
     ackReceived = false;
@@ -241,7 +297,27 @@ void NetworkManager::taskLoop(void* parameter) {
 
         if (Ethernet.linkStatus() == LinkON) {
             static unsigned long lastNtpAttempt = 0;
-            unsigned long ntpInterval = (RTCService::currentTimeSource == TSRC_NTP) ? NTP_SYNC_INTERVAL_MS : 15000UL;
+            static uint8_t lastObservedTimeSource = TSRC_INVALID;
+
+            // Zaman kaynağı bu turda İLK KEZ "şüpheli"ye (TSRC_INVALID) düştüyse
+            // - rtcNowSafe() bir bozulma/mantıksız sıçrama tespit ettiği için -
+            // bir sonraki NTP denemesini zorla hemen tetikle. lastNtpAttempt=0
+            // yapmak, saatlik senkron periyodunun ortasında olsak bile (henüz
+            // birkaç saniye önce başarılı bir NTP denemesi yapılmış olsa dahi)
+            // bekleme kalıntısını sıfırlar - "şüpheli" durumda saatlerce yanlış
+            // zamanla event üretmeye devam etmek yerine anında düzeltme denenir.
+            uint8_t currentSourceNow = RTCService::currentTimeSource;
+            if (currentSourceNow == TSRC_INVALID && lastObservedTimeSource != TSRC_INVALID) {
+                lastNtpAttempt = 0;
+                Serial.println("WARNING: Time source became suspected (TSRC_INVALID) - forcing immediate NTP retry.");
+            }
+            lastObservedTimeSource = currentSourceNow;
+
+            // Zaten NTP ile senkronsa saatte bir yeniden dener (NTP_SYNC_INTERVAL_MS);
+            // senkron değilse (henüz hiç senkron olamadı YA DA az önce şüpheli
+            // işaretlendi) her 15 saniyede bir dener - cihaz gerçek zamana mümkün
+            // olduğunca hızlı kavuşsun, RTC dead-reckoning'e bel bağlama süresi kısalsın.
+            unsigned long ntpInterval = (currentSourceNow == TSRC_NTP) ? NTP_SYNC_INTERVAL_MS : 15000UL;
 
             if (lastNtpAttempt == 0 || now - lastNtpAttempt >= ntpInterval) {
                 lastNtpAttempt = now;
@@ -269,6 +345,10 @@ void NetworkManager::taskLoop(void* parameter) {
                         mqtt.subscribe(TOPIC_CMD, 1);
                         OtaGuard::confirmHealth();
                     } else {
+                        // Exponential backoff + jitter: broker yeniden başladığında
+                        // sahadaki tüm cihazlar aynı anda değil, saçılarak
+                        // reconnect denesin diye (random jitter olmasaydı hepsi
+                        // aynı milisaniyede tekrar deneyip broker'ı boğardı).
                         backoff = min(backoff * 2, 60000UL);
                         backoff += random(0, 1000);
                     }
@@ -276,6 +356,19 @@ void NetworkManager::taskLoop(void* parameter) {
                 }
             } else {
                 mqtt.loop();
+
+                // mqttCallback() sırasında kuyruğa yazılan cevaplar/aboneliği
+                // burada, mqtt.loop() çağrısı TAMAMEN bittikten sonra gönderilir
+                // - neden için bkz. pendingCmdResQueue tanımının yanındaki not.
+                for (uint8_t i = 0; i < pendingCmdResCount; i++) {
+                    mqtt.publish(TOPIC_CMD_RES, pendingCmdResQueue[i], false, 1);
+                }
+                pendingCmdResCount = 0;
+                if (pendingAclResubscribe) {
+                    pendingAclResubscribe = false;
+                    mqtt.subscribe(TOPIC_ACL, 1);
+                }
+
                 waitingForAck = processPendingAck(waitingForAck);
                 
                 if (aclMessageReceived) {
@@ -312,7 +405,17 @@ void NetworkManager::taskLoop(void* parameter) {
                 }
             }
         } else {
-            RTCService::currentTimeSource = TSRC_RTC;
+            // Ethernet linki yokken NTP güveni de düşer, ama bu satır bilerek
+            // SADECE TSRC_NTP -> TSRC_RTC indirgemesi yapıyor. Eskiden burada
+            // koşulsuzca TSRC_RTC yazılıyordu - bu, rtcNowSafe()'in az önce
+            // tespit ettiği TSRC_INVALID (şüpheli/bozuk zaman) bayrağını link
+            // sadece düştü diye sessizce "güvenilir"e çeviriyordu. Kötü bir
+            // zamanı iyiymiş gibi göstermek, iyi bir zamanı güvensiz göstermekten
+            // çok daha tehlikeli - bu yüzden INVALID durumuna hiç dokunmuyoruz;
+            // düzeltmeyi yine NTP (link geri geldiğinde) ya da settime komutu yapsın.
+            if (RTCService::currentTimeSource == TSRC_NTP) {
+                RTCService::currentTimeSource = TSRC_RTC;
+            }
         }
 
         EventQueue::saveCheckpoint(false);

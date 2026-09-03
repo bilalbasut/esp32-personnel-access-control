@@ -5,6 +5,12 @@
 // ============================================================
 // 2. DATA STRUCTURES & ENUMS
 // ============================================================
+// event_queue.cpp bu struct'ı doğrudan /events.bin dosyasına byte byte yazıp
+// okuyor (bkz. RECORD_SIZE, config.h). Yani bu, disk üzerindeki sabit bir
+// dosya formatı - alan eklemek/çıkarmak veya sırasını değiştirmek, cihazda
+// zaten flash'ta duran eski kayıtları bozar. `reserved[9]` alanı da bu
+// yüzden var: ileride yeni bir alan gerekirse mevcut kayıtları taşımadan
+// (migration yazmadan) buradan pay çıkarılabilir.
 #pragma pack(push, 1)
 struct AccessRecord {
     uint32_t seq;
@@ -45,7 +51,10 @@ enum Direction : uint8_t { DIR_IN = 0, DIR_OUT = 1 };
 enum ResultCode : uint8_t { RESULT_GRANTED = 0, RESULT_UNKNOWN = 1, RESULT_EXPIRED = 2, RESULT_SCHEDULE = 3, RESULT_MANUAL = 4 };
 enum TimeSource : uint8_t { TSRC_NTP = 0, TSRC_RTC = 1, TSRC_INVALID = 2 };
 
-// Helpers
+// CRC16 - flash'a yazılan bir AccessRecord'un bozulup bozulmadığını (ani
+// güç kesintisi, yarım kalmış write vb.) anlamak için. isRecordValid() bunu
+// kullanarak rebuildQueueState() içinde geçersiz/yarım kayıtları eleyip
+// kuyruğu sadece sağlam kayıtlardan yeniden inşa ediyor.
 inline uint16_t calculateCRC16(const uint8_t* data, size_t length) {
     uint16_t crc = 0xFFFF;
     for (size_t i = 0; i < length; i++) {
@@ -115,6 +124,11 @@ inline const char* timeSourceToText(uint8_t source) {
     switch (source) { case TSRC_NTP: return "ntp"; case TSRC_RTC: return "rtc"; default: return "invalid"; }
 }
 
+// ACLEngine, kart listesini bu karşılaştırıcıyla sıralı tutuyor ve
+// evaluateAccess() içinde std::lower_bound ile ikili arama yapıyor - yani
+// binary search geçerli olsun diye liste her zaman bu sıraya göre sıralı
+// kalmalı (loadAclToRAM() içindeki std::sort de aynı karşılaştırıcıyı
+// kullanıyor).
 inline bool compareAclRecords(const AclRecord& a, const AclRecord& b) {
     if (a.uidLen != b.uidLen) return a.uidLen < b.uidLen;
     return memcmp(a.uid, b.uid, a.uidLen) < 0;
