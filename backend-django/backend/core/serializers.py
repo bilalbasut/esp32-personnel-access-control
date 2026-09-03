@@ -6,8 +6,8 @@ VERSION_RE = re.compile(r"^[a-zA-Z0-9._-]{1,50}$")
 
 
 class AccessEventSerializer(serializers.ModelSerializer):
-    ad_soyad = serializers.CharField(read_only=True)
-    departman = serializers.CharField(read_only=True)
+    full_name = serializers.CharField(read_only=True)
+    department = serializers.CharField(read_only=True)
 
     class Meta:
         model = AccessEvent

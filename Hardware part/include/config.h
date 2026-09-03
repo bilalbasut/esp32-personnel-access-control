@@ -63,7 +63,7 @@ inline IPAddress deviceIP(192, 168, 11, 155);
 inline IPAddress dnsIP(8, 8, 8, 8);
 inline IPAddress gatewayIP(192, 168, 10, 1);
 inline IPAddress subnetMask(255, 255, 254, 0);
-inline IPAddress mqttServer(192, 168, 10, 87);
+inline IPAddress mqttServer(192, 168, 10, 150);
 const uint16_t MQTT_PORT = 1883;
 
 // MQTT Topics

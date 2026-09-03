@@ -30,7 +30,7 @@ class EventViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         sql = """
-            SELECT a.*, e.ad_soyad, e.departman
+            SELECT a.*, e.full_name, e.department
             FROM access_events a
             LEFT JOIN cards c ON a.uid = c.uid
             LEFT JOIN employees e ON c.employee_id = e.id
@@ -183,12 +183,12 @@ class PdksReportView(APIView):
             GROUP BY employee_id, working_date
         )
         SELECT
-            e.id AS employee_id, e.ad_soyad, e.departman, z.working_date,
+            e.id AS employee_id, e.full_name, e.department, z.working_date,
             z.first_in_main, z.last_out_main, z.total_work_seconds,
             z.yemek_molasi_seconds, z.mola_seconds
         FROM daily_zone_totals z
         JOIN employees e ON z.employee_id = e.id
-        ORDER BY z.working_date DESC, e.ad_soyad ASC;
+        ORDER BY z.working_date DESC, e.full_name ASC;
         """
 
         report_tz = getattr(settings, "REPORT_TZ", "Europe/Istanbul")
@@ -225,7 +225,7 @@ class PdksReportView(APIView):
             fin = datetime.fromtimestamp(r["first_in_main"], tz=timezone.utc).strftime("%H:%M:%S") if r["first_in_main"] else ""
             lout = datetime.fromtimestamp(r["last_out_main"], tz=timezone.utc).strftime("%H:%M:%S") if r["last_out_main"] else ""
             fields = [
-                r["employee_id"], r["ad_soyad"], r["departman"], r["working_date"],
+                r["employee_id"], r["full_name"], r["department"], r["working_date"],
                 fin, lout,
                 format_dur(r["total_work_seconds"]),
                 format_dur(r["yemek_molasi_seconds"]),

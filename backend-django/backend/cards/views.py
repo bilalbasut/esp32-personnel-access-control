@@ -12,7 +12,7 @@ from core.acl import publish_acl_update
 
 
 class EmployeeViewSet(viewsets.ModelViewSet):
-    queryset = Employee.objects.all().order_by("ad_soyad")
+    queryset = Employee.objects.all().order_by("full_name")
     serializer_class = EmployeeSerializer
 
 
@@ -45,7 +45,7 @@ class CardViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         card = serializer.save()
-        if card.aktif == 1:
+        if card.is_active:
             publish_acl_update()
 
     def perform_update(self, serializer):
@@ -70,8 +70,8 @@ class CardViewSet(viewsets.ModelViewSet):
         try:
             with transaction.atomic():
                 emp = Employee.objects.create(
-                    ad_soyad=data["ad_soyad"],
-                    departman=data.get("departman") or None
+                    full_name=data["full_name"],
+                    department=data.get("department") or None
                 )
                 card = Card.objects.create(
                     uid=uid,
@@ -81,7 +81,7 @@ class CardViewSet(viewsets.ModelViewSet):
                     valid_to=data.get("valid_to"),
                     win_start_m=data.get("win_start_m", 0),
                     win_end_m=data.get("win_end_m", 1440),
-                    aktif=1
+                    is_active=True
                 )
         except IntegrityError:
             # Pre-check above is racy under concurrent onboarding of the same
@@ -90,7 +90,7 @@ class CardViewSet(viewsets.ModelViewSet):
 
         publish_acl_update()
         return Response({
-            "message": f"Card {uid} registered for {emp.ad_soyad}.",
+            "message": f"Card {uid} registered for {emp.full_name}.",
             "employee_id": emp.id,
             "uid": card.uid
         }, status=status.HTTP_201_CREATED)
@@ -103,23 +103,23 @@ class CardViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
 
         emp_id = serializer.validated_data["employee_id"]
-        aktif_val = serializer.validated_data.get("aktif")
+        is_active_val = serializer.validated_data.get("is_active")
 
         if emp_id is not None:
             if not Employee.objects.filter(id=emp_id).exists():
                 return Response({"error": "employee_id does not exist."}, status=status.HTTP_400_BAD_REQUEST)
             card.employee_id = emp_id
-            card.aktif = 1 if aktif_val is None else (1 if aktif_val else 0)
+            card.is_active = True if is_active_val is None else bool(is_active_val)
         else:
             card.employee_id = None
-            card.aktif = 0 if aktif_val is None else (1 if aktif_val else 0)
+            card.is_active = False if is_active_val is None else bool(is_active_val)
 
-        card.save(update_fields=["employee_id", "aktif"])
+        card.save(update_fields=["employee_id", "is_active"])
         publish_acl_update()
 
         return Response({
             "message": f"Card {card.uid} {'linked' if emp_id else 'unlinked'}.",
-            "card": {"uid": card.uid, "employee_id": card.employee_id, "aktif": card.aktif}
+            "card": {"uid": card.uid, "employee_id": card.employee_id, "is_active": card.is_active}
         })
 
     @action(detail=False, methods=["post"], url_path="revoke")
@@ -134,8 +134,8 @@ class CardViewSet(viewsets.ModelViewSet):
         if not card:
             return Response({"error": f"Card {normalized_uid} not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        card.aktif = 0
-        card.save(update_fields=["aktif"])
+        card.is_active = False
+        card.save(update_fields=["is_active"])
         publish_acl_update()
 
         return Response({"message": f"Card {normalized_uid} revoked."})

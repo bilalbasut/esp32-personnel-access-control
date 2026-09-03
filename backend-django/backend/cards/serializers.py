@@ -6,7 +6,7 @@ from core.acl import parse_floors
 class EmployeeSerializer(serializers.ModelSerializer):
     class Meta:
         model = Employee
-        fields = ["id", "ad_soyad", "departman", "aktif"]
+        fields = ["id", "full_name", "department", "is_active"]
 
 
 class CardSerializer(serializers.ModelSerializer):
@@ -19,7 +19,7 @@ class CardSerializer(serializers.ModelSerializer):
         model = Card
         fields = [
             "uid", "employee", "employee_id", "floors",
-            "valid_from", "valid_to", "win_start_m", "win_end_m", "aktif"
+            "valid_from", "valid_to", "win_start_m", "win_end_m", "is_active"
         ]
 
     def validate_uid(self, value):
@@ -42,21 +42,21 @@ class CardSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         # A freshly-registered card with no employee attached must not grant
-        # access by default. The model's `aktif` default is 1 (needed so
-        # `assign`/onboard, which set aktif explicitly, keep working), so we
+        # access by default. The model's `is_active` default is True (needed
+        # so `assign`/onboard, which set it explicitly, keep working), so we
         # only apply the inactive-until-assigned rule here: when the caller
-        # didn't send "aktif" explicitly AND didn't attach an employee, force
-        # aktif=0. This restores the original server.js/pre-migration
+        # didn't send "is_active" explicitly AND didn't attach an employee,
+        # force is_active=False. This restores the original server.js
         # behavior for the plain POST /api/cards path.
-        if "aktif" not in self.initial_data and validated_data.get("employee") is None:
-            validated_data["aktif"] = 0
+        if "is_active" not in self.initial_data and validated_data.get("employee") is None:
+            validated_data["is_active"] = False
         return super().create(validated_data)
 
 
 class CardOnboardSerializer(serializers.Serializer):
     """Handles the legacy /cards/add endpoint: creates employee and card simultaneously."""
-    ad_soyad = serializers.CharField(max_length=255)
-    departman = serializers.CharField(max_length=100, required=False, allow_blank=True, default="")
+    full_name = serializers.CharField(max_length=255)
+    department = serializers.CharField(max_length=100, required=False, allow_blank=True, default="")
     uid = serializers.CharField(max_length=50)
     floors = serializers.CharField(required=False, allow_blank=True, default="")
     valid_from = serializers.IntegerField(required=False, allow_null=True)
@@ -67,4 +67,4 @@ class CardOnboardSerializer(serializers.Serializer):
 
 class CardAssignSerializer(serializers.Serializer):
     employee_id = serializers.IntegerField(allow_null=True)
-    aktif = serializers.IntegerField(required=False)
+    is_active = serializers.BooleanField(required=False)

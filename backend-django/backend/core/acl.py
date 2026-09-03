@@ -118,7 +118,7 @@ def publish_acl_update():
     to pdks/merkez/cfg/acl, exactly like server.js's publishAclUpdate()."""
     from cards.models import Card
     cards = list(
-        Card.objects.filter(aktif=1).values_list(
+        Card.objects.filter(is_active=True).values_list(
             "uid", "floors", "valid_to", "win_start_m", "win_end_m", named=True
         )
     )
