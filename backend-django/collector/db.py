@@ -9,7 +9,6 @@ import os
 import time
 
 import psycopg2
-import psycopg2.extras
 
 DB_HOST = os.environ.get("DB_HOST", "127.0.0.1")
 DB_NAME = os.environ.get("DB_NAME", "pdks")
@@ -27,9 +26,21 @@ def connect(retries=20, delay_seconds=3):
     last_err = None
     for attempt in range(1, retries + 1):
         try:
-            return psycopg2.connect(
+            conn = psycopg2.connect(
                 host=DB_HOST, dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, port=DB_PORT
             )
+            # Autocommit from the start: wait_for_schema() below polls with
+            # plain SELECTs in a loop, and a "not ready yet" result isn't an
+            # exception - it's a normal 0-row-ish answer, so nothing closed
+            # that query's implicit transaction between polls. Under a
+            # non-autocommit connection that left every poll after the
+            # first re-using one still-open transaction's snapshot, which
+            # can just never observe schema created by a different
+            # connection afterwards - autocommit removes that whole failure
+            # mode instead of relying on every call site remembering to
+            # commit/rollback after each statement.
+            conn.autocommit = True
+            return conn
         except psycopg2.OperationalError as err:
             last_err = err
             print(f"[db] connect failed (attempt {attempt}/{retries}): {err}", flush=True)

@@ -13,6 +13,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 
+from accounts.audit import log_action
 from core.models import AccessEvent, Firmware
 from core.serializers import (
     AccessEventSerializer,
@@ -21,10 +22,17 @@ from core.serializers import (
 )
 
 
-class EventViewSet(viewsets.ReadOnlyModelViewSet):
+class EventViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     """
     Replaces GET /api/events with a read-only ViewSet.
     Maintains the 50 most recent events hydrated with employee info.
+
+    Deliberately list-only (not ReadOnlyModelViewSet): get_queryset() below
+    returns a RawQuerySet, which has no .filter()/.get() support. Router
+    detail routes (GET /api/events/<pk>) call get_object() -> filter by pk,
+    which would crash with AttributeError on this queryset - the same
+    reason FirmwareViewSet above is ListModelMixin-only instead of
+    ReadOnlyModelViewSet.
     """
     serializer_class = AccessEventSerializer
 
@@ -83,6 +91,11 @@ class FirmwareViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
                 "size": len(content),
                 "uploaded_at": int(time.time()),
             }
+        )
+
+        log_action(
+            request, "firmware.upload", f"Firmware {version}",
+            details={"filename": filename, "size": len(content), "md5": md5_hash}
         )
 
         return Response(

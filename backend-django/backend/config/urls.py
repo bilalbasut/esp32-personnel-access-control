@@ -1,8 +1,11 @@
 from django.conf import settings
+from django.contrib import admin
 from django.urls import include, path
 from django.views.static import serve as static_serve
+from rest_framework.authtoken.views import obtain_auth_token
 from rest_framework.routers import DefaultRouter
 
+from accounts.views import MeView
 from devices.views import DeviceViewSet
 from cards.views import CardViewSet, EmployeeViewSet
 from core.views import EventViewSet, FirmwareViewSet, PdksReportView
@@ -33,6 +36,16 @@ urlpatterns = [
 
     # Analytical / Reporting endpoint
     path("api/reports/pdks", PdksReportView.as_view(), name="reports-pdks"),
+
+    # Operator auth: POST {username, password} -> {"token": "..."} (DRF's
+    # built-in view - no custom login code needed). Send the token back as
+    # `Authorization: Token <token>` on subsequent requests.
+    path("api/auth/login", obtain_auth_token, name="auth-login"),
+    path("api/auth/me", MeView.as_view(), name="auth-me"),
+
+    # Django admin - a working management UI for operators/cards/employees/
+    # devices/firmware today, independent of the Vue frontend rewrite.
+    path("admin/", admin.site.urls),
 
     # Direct static binary serving for ESP32 HTTP OTA download
     path(

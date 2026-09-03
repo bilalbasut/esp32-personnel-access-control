@@ -33,6 +33,7 @@ class Migration(migrations.Migration):
                 ("result", models.SmallIntegerField(blank=True, null=True)),
                 ("mode", models.SmallIntegerField(blank=True, null=True)),
                 ("ingested_at", models.BigIntegerField(blank=True, null=True)),
+                ("raw_payload", models.JSONField(blank=True, null=True)),
             ],
             options={"db_table": "access_events"},
         ),

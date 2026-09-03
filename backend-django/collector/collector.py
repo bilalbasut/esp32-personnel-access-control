@@ -22,9 +22,8 @@ MAP_DIR = {"in": 0, "out": 1}
 MAP_MODE = {"online": 0, "offline": 1}
 MAP_TSRC = {"ntp": 0, "rtc": 1, "invalid": 2}
 
-conn = db.connect()
+conn = db.connect()  # returns an autocommit connection - see db.py
 db.wait_for_schema(conn)
-conn.autocommit = True
 
 
 def now_s():
@@ -91,10 +90,16 @@ def handle_event(client, device_id, payload):
 
     query = """
         INSERT INTO access_events
-        (device_id, seq, uid, employee_id, ts_utc, ts_source, dir, result, mode, ingested_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (device_id, seq, uid, employee_id, ts_utc, ts_source, dir, result, mode, ingested_at, raw_payload)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
     """
-    values = (device_id, data.get("seq"), data.get("uid"), employee_id, ts, tsrc_int, dir_int, res_int, mode_int, now)
+    # Store the original payload alongside the parsed columns - a mapping
+    # bug or a firmware field we haven't wired up yet shouldn't mean the
+    # data is gone forever; this makes replay/backfill possible.
+    values = (
+        device_id, data.get("seq"), data.get("uid"), employee_id, ts, tsrc_int, dir_int, res_int, mode_int, now,
+        json.dumps(data),
+    )
 
     try:
         with conn.cursor() as cur:

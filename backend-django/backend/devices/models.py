@@ -7,6 +7,13 @@ class Device(TimestampedModel):
     id = models.CharField(max_length=50, primary_key=True)
     name = models.CharField(max_length=100, null=True, blank=True)
     floor = models.IntegerField(null=True, blank=True)
+    # Human-entered installation metadata (room/hallway name, static
+    # network info for maintenance) - not reported by the hardware/MQTT
+    # protocol, so these stay whatever an operator fills in via the API/
+    # admin rather than being kept in sync automatically.
+    location = models.CharField(max_length=255, null=True, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    mac_address = models.CharField(max_length=17, null=True, blank=True)
     # Unix epoch, written by the collector service on every heartbeat/
     # status/event - kept as a plain integer (not a DateTimeField) because
     # collector.py writes it via raw psycopg2, not through this model.

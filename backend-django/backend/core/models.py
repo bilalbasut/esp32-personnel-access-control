@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 
 
 class TimestampedModel(models.Model):
@@ -21,6 +22,48 @@ class ActivatableModel(models.Model):
 
     class Meta:
         abstract = True
+
+
+class ActiveManager(models.Manager):
+    """Default manager for SoftDeletableModel: hides soft-deleted rows from
+    every normal queryset (list/detail views, FK traversal, admin list
+    pages) without anyone needing to remember to filter for it."""
+    def get_queryset(self):
+        return super().get_queryset().filter(deleted_at__isnull=True)
+
+
+class SoftDeletableModel(models.Model):
+    """Base for models where "delete" should preserve history instead of
+    erasing it (Employee, Card). AccessEvent/AuditLog rows referencing a
+    since-removed card or employee stay explainable instead of pointing at
+    nothing - this is the direct fix for that gap.
+
+    `objects` (the default manager) excludes soft-deleted rows everywhere.
+    `all_objects` is the explicit escape hatch for anything that genuinely
+    needs to see everything - an admin "show removed" view, an export, a
+    debugging query. Ordinary `.delete()` still does a real hard delete if
+    called directly (Django/admin bulk-delete tooling expects that); use
+    `soft_delete()` for the normal "remove this" path.
+    """
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    objects = ActiveManager()
+    all_objects = models.Manager()
+
+    class Meta:
+        abstract = True
+
+    def soft_delete(self):
+        self.deleted_at = timezone.now()
+        self.save(update_fields=["deleted_at"])
+
+    def restore(self):
+        self.deleted_at = None
+        self.save(update_fields=["deleted_at"])
+
+    @property
+    def is_deleted(self):
+        return self.deleted_at is not None
 
 
 class Firmware(models.Model):
@@ -59,6 +102,13 @@ class AccessEvent(models.Model):
     # When the collector actually wrote this row (unix epoch) - distinct
     # from ts_utc, which is the event's own hardware-reported time.
     ingested_at = models.BigIntegerField(null=True, blank=True)
+    # Safety net: the exact MQTT JSON payload this row was parsed from.
+    # Column-mapping bugs or a firmware update that adds a new field you
+    # haven't wired up yet would otherwise lose that data permanently -
+    # this lets you replay/backfill later instead. Nullable so existing
+    # rows (and any insert path that doesn't have the raw payload handy)
+    # aren't affected.
+    raw_payload = models.JSONField(null=True, blank=True)
 
     class Meta:
         db_table = "access_events"

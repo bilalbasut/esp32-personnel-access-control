@@ -16,9 +16,10 @@ Wire Format:
 """
 import struct
 
-import paho.mqtt.publish as mqtt_publish
 from django.conf import settings
 from django.db import connection
+
+from core import mqtt_utils
 
 def parse_floors(raw):
     """Mirrors server.js parseFloors(): normalize '1,3' / [1,3] into ints."""
@@ -125,12 +126,5 @@ def publish_acl_update():
     version = _next_acl_version()
     buf = build_acl_buffer(cards, version)
 
-    mqtt_publish.single(
-        "pdks/merkez/cfg/acl",
-        payload=buf,
-        qos=1,
-        retain=True,
-        hostname=settings.MQTT_HOST,
-        port=settings.MQTT_PORT,
-    )
+    mqtt_utils.publish("pdks/merkez/cfg/acl", buf, qos=1, retain=True)
     return version, len(cards), len(buf)

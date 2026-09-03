@@ -4,4 +4,3 @@ psycopg2-binary==2.9.9
 django-cors-headers==4.4.0
 paho-mqtt==1.6.1
 python-dotenv==1.0.1
-gunicorn==22.0.0

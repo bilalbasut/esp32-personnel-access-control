@@ -6,7 +6,7 @@ from core.acl import parse_floors
 class EmployeeSerializer(serializers.ModelSerializer):
     class Meta:
         model = Employee
-        fields = ["id", "full_name", "department", "is_active"]
+        fields = ["id", "full_name", "department", "employee_no", "email", "phone", "is_active"]
 
 
 class CardSerializer(serializers.ModelSerializer):
