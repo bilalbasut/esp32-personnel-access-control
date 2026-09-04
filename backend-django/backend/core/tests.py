@@ -18,6 +18,8 @@ from unittest.mock import patch
 
 from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import IntegrityError, transaction
+from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -25,6 +27,7 @@ from accounts.models import AuditLog
 from cards.models import Card, Employee
 from core.models import AccessEvent, Firmware
 from core.test_utils import AuthenticatedAPITestCase
+from devices.models import Device
 
 # Fixed instant chosen so that both the check-in and check-out below land on
 # the same Europe/Istanbul calendar day (default REPORT_TZ, UTC+3) - the
@@ -263,3 +266,41 @@ class EventListTests(AuthenticatedAPITestCase):
 
         newest = next(row for row in response.data if row["seq"] == 102)
         self.assertEqual(newest["full_name"], "Newest First Test")
+
+
+class BaseModelSaveBehaviorTests(TestCase):
+    """BaseModel.save() (core/models.py) - the auto_now=True stand-in.
+    Django's own auto_now has a documented gotcha: if you pass
+    update_fields=[...] and don't include the auto_now field's name in that
+    list, it silently does NOT get refreshed. BaseModel.save() deliberately
+    works around exactly that gotcha by always injecting "updated_at" into
+    update_fields itself - this pins that specific behavior down, using
+    Device as the vehicle since it's a simple, familiar BaseModel subclass."""
+
+    def test_partial_save_with_update_fields_still_refreshes_updated_at(self):
+        device = Device.objects.create(id="SAVE-TEST-01", name="Original")
+        original_updated_at = device.updated_at
+
+        device.name = "Changed"
+        device.save(update_fields=["name"])  # updated_at deliberately NOT listed
+
+        device.refresh_from_db()
+        self.assertEqual(device.name, "Changed")
+        self.assertGreater(device.updated_at, original_updated_at)
+
+
+class AccessEventConstraintTests(TestCase):
+    def test_duplicate_device_id_and_seq_raises_integrity_error(self):
+        """uniq_device_seq (AccessEvent.Meta.constraints, core/models.py) -
+        the collector's own duplicate-seq handling (collector/test_collector.py
+        test_duplicate_seq_still_acks_and_rolls_back_without_crashing) relies
+        on this exact constraint existing at the DB level; this confirms the
+        migration that created it is actually in effect via the ORM too."""
+        AccessEvent.objects.create(device_id="GATE-K3-001", seq=1)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                AccessEvent.objects.create(device_id="GATE-K3-001", seq=1)
+
+        # A different device with the same seq is a completely different
+        # story - the constraint is on the (device_id, seq) PAIR.
+        AccessEvent.objects.create(device_id="GATE-K3-002", seq=1)

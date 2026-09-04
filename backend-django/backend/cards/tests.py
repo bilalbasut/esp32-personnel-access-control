@@ -341,6 +341,66 @@ class CardValidationTests(AuthenticatedAPITestCase):
         self.assertEqual(card.win_start_m, 480)
         self.assertEqual(card.win_end_m, 1020)
 
+    def test_uid_is_stripped_and_uppercased(self):
+        # CardSerializer.validate_uid() (cards/serializers.py) - the plain
+        # POST /api/cards path normalizes uid itself; onboard()/revoke() do
+        # their own separate .strip().upper() (cards/views.py) since they
+        # use different serializers entirely. This is that third, otherwise
+        # untested normalization point.
+        response = self.client.post("/api/cards", {"uid": "  ab:cd:ef  "}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertTrue(Card.objects.filter(uid="AB:CD:EF").exists())
+        self.assertFalse(Card.objects.filter(uid="  ab:cd:ef  ").exists())
+
+
+class EmployeeUniqueConstraintTests(AuthenticatedAPITestCase):
+    """Employee.employee_no is unique=True (cards/models.py) but, unlike
+    Card's uid, EmployeeViewSet originally had no IntegrityError handling
+    at all - a duplicate employee_no fell straight through to an unhandled
+    500. First fix: cards/views.py EmployeeViewSet.create()/update() got
+    the same try/except IntegrityError -> 409 pattern CardViewSet.create()
+    already used for uid.
+
+    That wasn't enough on its own, and running this exact test caught it:
+    unlike uid (Card's primary key, which DRF does not auto-validate for
+    uniqueness), employee_no is a plain unique=True field, so
+    ModelSerializer auto-attaches a UniqueValidator that runs inside
+    serializer.is_valid() - before create()/update() ever reaches the
+    try/except, short-circuiting straight to a bare 400. Second fix:
+    EmployeeSerializer (cards/serializers.py) now disables that
+    auto-validator for employee_no via extra_kwargs, so validation passes
+    through to the database and the view's IntegrityError -> 409 handling
+    actually runs."""
+
+    def test_duplicate_employee_no_on_create_returns_409_not_500(self):
+        Employee.objects.create(full_name="First Person", employee_no="EMP-100")
+
+        response = self.client.post(
+            "/api/employees", {"full_name": "Second Person", "employee_no": "EMP-100"}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT, response.data)
+        self.assertEqual(Employee.objects.filter(employee_no="EMP-100").count(), 1)
+
+    def test_duplicate_employee_no_on_update_returns_409_not_500(self):
+        Employee.objects.create(full_name="First Person", employee_no="EMP-200")
+        second = Employee.objects.create(full_name="Second Person", employee_no="EMP-201")
+
+        response = self.client.patch(
+            f"/api/employees/{second.id}", {"employee_no": "EMP-200"}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT, response.data)
+        second.refresh_from_db()
+        self.assertEqual(second.employee_no, "EMP-201")  # untouched by the failed update
+
+    def test_multiple_employees_with_no_employee_no_are_allowed(self):
+        # unique=True in Postgres allows any number of NULLs - only actual
+        # duplicate VALUES collide. Worth pinning down since it's the
+        # opposite of what "unique" might naively suggest.
+        response1 = self.client.post("/api/employees", {"full_name": "No Badge One"}, format="json")
+        response2 = self.client.post("/api/employees", {"full_name": "No Badge Two"}, format="json")
+        self.assertEqual(response1.status_code, status.HTTP_201_CREATED, response1.data)
+        self.assertEqual(response2.status_code, status.HTTP_201_CREATED, response2.data)
+
 
 class SoftDeleteBehaviorTests(TestCase):
     """Model-layer tests for BaseModel's soft-delete machinery (core/models.py)
@@ -355,6 +415,16 @@ class SoftDeleteBehaviorTests(TestCase):
         employee.restore()
         self.assertTrue(Employee.objects.filter(id=employee.id).exists())
         self.assertIsNone(Employee.objects.get(id=employee.id).deleted_at)
+
+    def test_is_deleted_property_reflects_deleted_at(self):
+        employee = Employee.objects.create(full_name="Property Check")
+        self.assertFalse(employee.is_deleted)
+
+        employee.delete()
+        self.assertTrue(employee.is_deleted)  # same in-memory instance, no refresh needed
+
+        employee.restore()
+        self.assertFalse(employee.is_deleted)
 
     def test_hard_deleting_employee_nulls_a_soft_deleted_cards_employee_fk(self):
         """Employee.Meta.base_manager_name = "all_objects" (cards/models.py)

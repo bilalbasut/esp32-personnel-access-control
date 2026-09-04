@@ -7,6 +7,18 @@ class EmployeeSerializer(serializers.ModelSerializer):
     class Meta:
         model = Employee
         fields = ["id", "full_name", "department", "employee_no", "email", "phone", "is_active"]
+        # employee_no is unique=True (cards/models.py), so ModelSerializer
+        # auto-attaches a UniqueValidator that runs inside is_valid() -
+        # long before EmployeeViewSet.create()/update() ever gets a chance
+        # to run perform_create()/super().update() and catch the resulting
+        # IntegrityError. That auto-validator was winning and returning a
+        # bare 400 (DRF's own "employee with this employee no already
+        # exists" message) instead of the view's deliberate 409, which is
+        # what a caught-by-a-test round of "more tests" turned up. uid on
+        # Card never has this problem because it's the primary key, and
+        # DRF doesn't auto-validate uniqueness on primary keys - it leaves
+        # that to the database, same as we now do here.
+        extra_kwargs = {"employee_no": {"validators": []}}
 
 
 class CardSerializer(serializers.ModelSerializer):

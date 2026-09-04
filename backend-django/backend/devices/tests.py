@@ -135,6 +135,18 @@ class DeviceCommandActionTests(AuthenticatedAPITestCase):
         self.assertEqual(entry.operator_id, self.operator.id)
         self.assertEqual(entry.details["cmd"], "open")
 
+    @patch("core.mqtt_utils.publish")
+    def test_extra_payload_is_merged_into_the_mqtt_message(self, mock_publish):
+        response = self.client.post(
+            f"/api/devices/{self.device.id}/command",
+            {"cmd": "settime", "payload": {"epoch": 1735689600}},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+        _, payload = mock_publish.call_args[0][:2]
+        self.assertIn('"epoch": 1735689600', payload)
+
     def test_invalid_command_returns_400_and_does_not_publish(self):
         with patch("core.mqtt_utils.publish") as mock_publish:
             response = self.client.post(
@@ -183,6 +195,20 @@ class DeviceOtaActionTests(AuthenticatedAPITestCase):
         mock_publish.assert_called_once()
         entry = AuditLog.objects.get(action="device.ota")
         self.assertEqual(entry.details["version"], "3.0.0-test")
+
+    @patch("core.mqtt_utils.publish")
+    def test_version_with_leading_v_prefix_still_resolves(self, mock_publish):
+        # devices/views.py ota() tolerates a "v" prefix (raw_version.lstrip("v"))
+        # for whichever of the two forms ISN'T already an exact match - here
+        # the registry has "3.0.0-test" (no "v"), so "v3.0.0-test" only
+        # resolves via the second fallback in the lookup chain.
+        response = self.client.post(
+            f"/api/devices/{self.device.id}/ota", {"version": "v3.0.0-test"}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        # The URL must reference the REGISTRY's version string, not whatever
+        # the caller happened to type.
+        self.assertIn("/api/firmware/3.0.0-test/download", response.data["ota_url"])
 
     def test_unknown_firmware_version_returns_404(self):
         with patch("core.mqtt_utils.publish") as mock_publish:

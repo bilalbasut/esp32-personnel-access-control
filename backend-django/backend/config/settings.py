@@ -115,6 +115,39 @@ MIDDLEWARE = [
 # şu an sadece Django admin login formunu desteklemek için var.
 CORS_ALLOW_ALL_ORIGINS = True
 
+# BİLEREK EKLENDİ - Django'nun kendi varsayılan LOGGING'i (bu dosyada hiç
+# LOGGING tanımlanmamış olsaydı devreye giren hali), django.request logger'ını
+# ("bir view 4xx/5xx dönünce" ateşlenir, ama sadece 500+ 'ERROR' seviyesinde -
+# 400/404'ler bu logger'ın kendi level="ERROR" eşiğinin altında kaldığı için
+# hiç görünmez) mail_admins (AdminEmailHandler) handler'ına bağlıyor. Bu proje
+# hiç ADMINS/EMAIL_* tanımlamadığı için o handler zaten pratikte ölü kod
+# yürütüyordu (fail_silently=True ile sessizce hiçbir şey yapmıyordu) - ama
+# AdminEmailHandler.emit() gerçek bir exception olsun olmasın HER ZAMAN bir
+# ExceptionReporter traceback şablonu render etmeye çalışıyor, ve Django'nun
+# template Context.__copy__()'ı Python 3.14'te kırılan bir super() davranışına
+# dayanıyor - sonuç: Python 3.14 altında `manage.py test` (test runner DEBUG'ı
+# False'a zorluyor, mail_admins'in require_debug_false filtresini aktive
+# ediyor) her 500 dönen view'da gerçek bir crash'e dönüşüyor (devices/tests.py
+# DeviceCommandActionTests/DeviceOtaActionTests bunu yakaladı). django.request
+# logger'ını burada mail_admins yerine düz bir console handler'a yönlendirmek
+# hem bu crash'i ortadan kaldırıyor hem zaten hiçbir şey yapmayan bir
+# handler'a bel bağlamayı bırakıyor - production'da gerçek hata takibi
+# istenirse (Sentry vb.) buraya eklenecek yer tam olarak burası.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {"class": "logging.StreamHandler"},
+    },
+    "loggers": {
+        "django.request": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+    },
+}
+
 ROOT_URLCONF = "config.urls"
 WSGI_APPLICATION = "config.wsgi.application"
 

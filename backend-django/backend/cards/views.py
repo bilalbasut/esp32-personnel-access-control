@@ -23,6 +23,60 @@ class EmployeeViewSet(AuditedModelViewSet, viewsets.ModelViewSet):
     queryset = Employee.objects.all().order_by("full_name")
     serializer_class = EmployeeSerializer
 
+    def create(self, request, *args, **kwargs):
+        """CardViewSet.create()'deki (bu dosyada yukarıda) AYNI kalıp,
+        AYNI sebep - burada eksikti, testler yazılana kadar fark
+        edilmemişti: employee_no unique=True (cards/models.py), ama bu
+        view onu hiç yakalamıyordu, yani tekrarlı bir employee_no ham bir
+        500'e düşerdi. Card zaten uid için bu korumaya sahipti; Employee'nin
+        de aynısına ihtiyacı vardı.
+
+        perform_create() burada, Card'ın AKSİNE, transaction.atomic()
+        İÇİNE ALINDI - çünkü Employee'de geri alınmaması gereken bir yan
+        etki (MQTT publish_acl_update()) yok, yani Card'daki gerekçe burada
+        geçerli değil. Bu sarma kozmetik değil: IntegrityError'ı Python
+        seviyesinde yakalamak, Postgres'in "bu transaction artık bozuk,
+        rollback'e kadar yeni sorgu kabul etmiyorum" durumunu SİLMİYOR -
+        ATOMIC_REQUESTS kapalı olduğu için normal prod isteğinde bu hiç
+        görünmüyordu (autocommit tek başarısız INSERT'i kendi başına
+        toparlıyor), ama TestCase'in her testi saran örtük atomic bloğunun
+        İÇİNDEyken (python manage.py test'in her zaman yaptığı gibi)
+        bozulma test'in geri kalanına sıçrıyordu: 409 yanıtının kendisi
+        doğru dönüyordu ama testin bir SONRAKİ DB sorgusu (ör. satır
+        sayısını doğrulamak) TransactionManagementError ile patlıyordu.
+        atomic() burada bir SAVEPOINT açıp IntegrityError'da sadece o
+        savepoint'e geri sarıyor, dış transaction'a dokunmuyor - onboard()'un
+        (bu dosyada aşağıda) zaten aynı sebeple yaptığı şey."""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            with transaction.atomic():
+                self.perform_create(serializer)
+        except IntegrityError:
+            employee_no = serializer.validated_data.get("employee_no")
+            return Response(
+                {"error": f"Employee No {employee_no} is already registered."},
+                status=status.HTTP_409_CONFLICT
+            )
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+    def update(self, request, *args, **kwargs):
+        """create()'deki aynı korumanın, aynı transaction.atomic()
+        sarmalıyla birlikte, update (PATCH/PUT) tarafı - bir employee_no'yu
+        ZATEN kayıtlı başka bir employee_no'ya değiştirmek de aynı şekilde
+        ham bir IntegrityError/500 üretirdi (ve sarmalanmadan bırakılsaydı,
+        aynı şekilde sonraki sorguları bozardı)."""
+        try:
+            with transaction.atomic():
+                return super().update(request, *args, **kwargs)
+        except IntegrityError:
+            employee_no = request.data.get("employee_no")
+            return Response(
+                {"error": f"Employee No {employee_no} is already registered."},
+                status=status.HTTP_409_CONFLICT
+            )
+
 
 class CardViewSet(AuditedModelViewSet, viewsets.ModelViewSet):
     queryset = Card.objects.select_related("employee").all().order_by("uid")
