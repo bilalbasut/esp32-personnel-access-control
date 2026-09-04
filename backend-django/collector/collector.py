@@ -48,7 +48,7 @@ def handle_event(client, device_id, payload):
 
     now = now_s()
 
-    # Fırsatçı presence/firmware takibi - "fw" sadece event payload'larında
+    # Opportunistic presence/firmware takibi - "fw" sadece event payload'larında
     # görünür, heartbeat'lerde asla, yani bu değeri yakalayabileceğimiz tek
     # yer burası. Aşağıdaki insert tekrar (duplicate) çıksa bile bu çalışır,
     # çünkü bu sadece presence + versiyon, event'in kendisi değil.

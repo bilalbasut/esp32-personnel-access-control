@@ -2,10 +2,10 @@ from django.conf import settings
 from django.contrib import admin
 from django.urls import include, path
 from django.views.static import serve as static_serve
-from rest_framework.authtoken.views import obtain_auth_token
 from rest_framework.routers import DefaultRouter
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
-from accounts.views import MeView
+from accounts.views import LogoutView, MeView
 from devices.views import DeviceViewSet
 from cards.views import CardViewSet, EmployeeViewSet
 from core.views import EventViewSet, FirmwareViewSet, PdksReportView
@@ -37,10 +37,15 @@ urlpatterns = [
     # Analitik / Raporlama endpoint'i
     path("api/reports/pdks", PdksReportView.as_view(), name="reports-pdks"),
 
-    # Operatör auth: POST {username, password} -> {"token": "..."} (DRF'in
-    # hazır view'ı - custom login kodu gerekmiyor). Sonraki isteklerde
-    # token'ı `Authorization: Token <token>` olarak geri gönder.
-    path("api/auth/login", obtain_auth_token, name="auth-login"),
+    # Operatör auth (JWT): POST {username, password} -> {"access", "refresh"}
+    # (simplejwt'nin hazır view'ı - custom login kodu gerekmiyor). Sonraki
+    # isteklerde access token'ı `Authorization: Bearer <access>` olarak geri
+    # gönder; access süresi dolunca (15dk, bkz. config/settings.py SIMPLE_JWT)
+    # refresh token'ı /api/auth/refresh'e verip yenisini al. /api/auth/logout
+    # refresh token'ı blacklist'e ekler.
+    path("api/auth/login", TokenObtainPairView.as_view(), name="auth-login"),
+    path("api/auth/refresh", TokenRefreshView.as_view(), name="auth-refresh"),
+    path("api/auth/logout", LogoutView.as_view(), name="auth-logout"),
     path("api/auth/me", MeView.as_view(), name="auth-me"),
 
     # Django admin - Vue frontend'inden bağımsız, operatörler/kartlar/

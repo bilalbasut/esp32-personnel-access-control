@@ -11,7 +11,14 @@ class AccessEventSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = AccessEvent
+        # "__all__" burada fiilen zararsız (EventViewSet sadece ListModelMixin,
+        # hiçbir create/update/destroy endpoint'i bu serializer'ı yazma
+        # amaçlı kullanmıyor) ama yine de BaseModel'in bookkeeping alanlarını
+        # (created_by/updated_by/deleted_by) read-only işaretlemek, DeviceSerializer'daki
+        # aynı disiplinle tutarlı kalmak ve ileride bu serializer'a bir yazma
+        # yolu eklenirse sürpriz yaşanmamasını garanti etmek için.
         fields = "__all__"
+        read_only_fields = ["created_at", "updated_at", "created_by", "updated_by", "deleted_at", "deleted_by"]
 
 
 class FirmwareSerializer(serializers.ModelSerializer):

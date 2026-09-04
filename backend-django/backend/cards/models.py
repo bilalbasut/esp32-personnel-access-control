@@ -1,9 +1,9 @@
 from django.db import models
 
-from core.models import TimestampedModel, ActivatableModel, SoftDeletableModel
+from core.models import BaseModel
 
 
-class Employee(TimestampedModel, ActivatableModel, SoftDeletableModel):
+class Employee(BaseModel):
     full_name = models.CharField(max_length=255, null=True, blank=True)
     department = models.CharField(max_length=100, null=True, blank=True)
     # İK/kartvizit numarası - içerideki otomatik artan `id`'den farklı; o
@@ -26,8 +26,12 @@ class Employee(TimestampedModel, ActivatableModel, SoftDeletableModel):
         # normal uygulama kodu için filtreli kalıyor.
         base_manager_name = "all_objects"
 
+    def __str__(self):
+        # AuditLog'daki target_repr için (core/audit_viewset.py).
+        return f"{self.full_name} (#{self.pk})" if self.full_name else f"Employee #{self.pk}"
 
-class Card(TimestampedModel, ActivatableModel, SoftDeletableModel):
+
+class Card(BaseModel):
     uid = models.CharField(max_length=50, primary_key=True)
     employee = models.ForeignKey(
         Employee, null=True, blank=True, on_delete=models.SET_NULL,
@@ -50,3 +54,6 @@ class Card(TimestampedModel, ActivatableModel, SoftDeletableModel):
         # vermeyi ANINDA durdurmalı.
         self.is_active = False
         super().delete(*args, **kwargs)
+
+    def __str__(self):
+        return self.uid

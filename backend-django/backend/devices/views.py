@@ -10,6 +10,7 @@ from rest_framework.response import Response
 
 from accounts.audit import log_action
 from core import mqtt_utils
+from core.audit_viewset import AuditedModelViewSet
 from core.models import Firmware
 from devices.models import Device
 from devices.serializers import DeviceCommandSerializer, DeviceOTASerializer, DeviceSerializer
@@ -28,22 +29,13 @@ def _next_cmd_seq():
         return cursor.fetchone()[0]
 
 
-class DeviceViewSet(viewsets.ModelViewSet):
+class DeviceViewSet(AuditedModelViewSet, viewsets.ModelViewSet):
+    # perform_create/update/destroy artık elle yazılmıyor - AuditedModelViewSet
+    # (core/audit_viewset.py) created_by/updated_by/deleted_by'ı set edip
+    # alan-bazlı diff'i AuditLog'a otomatik yazıyor.
     queryset = Device.objects.all().order_by("id")
     serializer_class = DeviceSerializer
     lookup_field = "id"
-
-    def perform_create(self, serializer):
-        device = serializer.save()
-        log_action(self.request, "device.create", f"Device {device.id} ({device.name})")
-
-    def perform_update(self, serializer):
-        device = serializer.save()
-        log_action(self.request, "device.update", f"Device {device.id} ({device.name})")
-
-    def perform_destroy(self, instance):
-        log_action(self.request, "device.delete", f"Device {instance.id} ({instance.name})")
-        instance.delete()
 
     @action(detail=True, methods=["post"], url_path="command")
     def send_command(self, request, *args, **kwargs):

@@ -19,4 +19,13 @@ def log_action(request, action, target_repr="", details=None):
         action=action,
         target_repr=target_repr,
         details=details or {},
+        # created_by BURADA AÇIKÇA set ediliyor - AuditLog.objects.create()
+        # ham bir ORM çağrısı, AuditedModelViewSet'in perform_create()'inin
+        # (core/audit_viewset.py) hiç dışına, doğrudan buradan geçiyor, yani
+        # BaseModel'den gelen created_by kendiliğinden set OLMAZ. accounts/
+        # models.py'deki AuditLog docstring'i created_by'ın "pratikte HER
+        # ZAMAN operator ile aynı değeri taşıyacağını" iddia ediyordu - bu
+        # satır olmadan o iddia yanlıştı (created_by hep None kalıyordu,
+        # ilk kez gerçek testlerle yazılınca ortaya çıktı).
+        created_by=operator,
     )

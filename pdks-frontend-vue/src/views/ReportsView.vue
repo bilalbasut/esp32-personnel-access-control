@@ -44,8 +44,14 @@ const runReport = async () => {
   }
 };
 
-const exportCsv = () => {
-  window.open(api.getPdksReportCsvUrl(getEpochRange()), '_blank');
+const exportCsv = async () => {
+  try {
+    // Artık login gerektiriyor, bkz. api.js downloadFile() yorumu - düz
+    // bir window.open() linki Authorization header'ı taşıyamazdı.
+    await api.downloadPdksReportCsv(getEpochRange());
+  } catch (err) {
+    error.value = err.message || 'CSV export failed.';
+  }
 };
 </script>
 

@@ -10,10 +10,11 @@ from django.http import HttpResponse, FileResponse
 from rest_framework import viewsets, status, mixins
 from rest_framework.views import APIView
 from rest_framework.decorators import action
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 
-from accounts.audit import log_action
+from core.audit_viewset import log_change, snapshot
 from core.models import AccessEvent, Firmware
 from core.serializers import (
     AccessEventSerializer,
@@ -81,22 +82,33 @@ class FirmwareViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
         filename = f"firmware_{version}.bin"
         file_path = os.path.join(settings.FIRMWARE_DIR, filename)
 
+        # update_or_create'den ÖNCE mevcut satırın (varsa) diff için önceki
+        # halini alıyoruz - aynı version'a ikinci bir upload aslında bir
+        # update (var olan binary'nin üzerine yazma), created_by'ı ezmemesi
+        # gerekiyor (bkz. aşağıdaki created/updated_by ayrımı).
+        existing = Firmware.objects.filter(version=version).first()
+        before = snapshot(existing) if existing else None
+        is_new = existing is None
+
+        user = request.user if getattr(request.user, "is_authenticated", False) else None
+
         with open(file_path, "wb") as destination:
             destination.write(content)
 
-        firmware, _ = Firmware.objects.update_or_create(
+        firmware, created = Firmware.objects.update_or_create(
             version=version,
             defaults={
                 "filename": filename,
                 "md5": md5_hash,
                 "size": len(content),
                 "uploaded_at": int(time.time()),
+                **({"created_by": user} if is_new else {"updated_by": user}),
             }
         )
 
-        log_action(
-            request, "firmware.upload", f"Firmware {version}",
-            details={"filename": filename, "size": len(content), "md5": md5_hash}
+        log_change(
+            request, "firmware", "create" if created else "update", firmware,
+            before=before
         )
 
         return Response(
@@ -104,11 +116,20 @@ class FirmwareViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
             status=status.HTTP_201_CREATED
         )
 
-    @action(detail=True, methods=["get"], url_path="download")
+    @action(detail=True, methods=["get"], url_path="download", permission_classes=[AllowAny])
     def download(self, request, version=None):
         """
         Streams the binary file directly to the ESP32 W5500 client.
         Serves: GET /api/firmware/<version>/download/
+
+        BİLEREK AllowAny: bu isteği atan taraf bir tarayıcı/operatör değil,
+        network_manager.cpp'nin OTAUpdater'ı - ESP32 firmware'i JWT
+        üretemez/gönderemez, düz bir HTTP GET atıyor (bkz. devices/views.py
+        ota() action'ının kurduğu url). Global IsAuthenticated'a (bkz.
+        config/settings.py DEFAULT_PERMISSION_CLASSES) rağmen bu tek action
+        açık kalmalı, yoksa gerçek donanımda her OTA indirmesi 401 ile
+        patlar. Diğer FirmwareViewSet action'ları (list, upload_binary)
+        hâlâ login gerektiriyor - sadece indirme ucu istisna.
         """
         firmware = self.get_object()
         file_path = os.path.join(settings.FIRMWARE_DIR, firmware.filename)

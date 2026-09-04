@@ -10,9 +10,15 @@ it was called with, and asserts on those.
 This is deliberately the regression test for the bug we just fixed: every
 one of the four upsert queries below (device fw/presence, /status, /hb,
 OTA cmd/res) must set created_at/updated_at explicitly, because these
-INSERTs bypass Django's ORM entirely - auto_now_add/auto_now never run,
-and Postgres's NOT NULL constraint on those columns has no DB-level
-DEFAULT to fall back on (see devices/models.py TimestampedModel).
+INSERTs bypass Django's ORM entirely - auto_now_add/auto_now never run.
+Devices now inherits core/models.py BaseModel, whose created_at/updated_at
+DO carry a Postgres-level db_default (see BaseModel docstring) - that
+covers the plain INSERT case (a first-ever row for a device), but a
+db_default is NOT consulted by `ON CONFLICT ... DO UPDATE SET ...`: if
+updated_at isn't named in that SET clause, an existing row's updated_at
+simply stays at its old value instead of refreshing. So this test's
+concern is still real for the update path, even though the insert path
+now has a safety net it didn't have before.
 
 Run directly (needs the collector's own venv/deps - paho-mqtt, psycopg2):
     cd collector && python -m unittest test_collector.py -v

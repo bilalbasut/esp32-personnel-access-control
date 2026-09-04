@@ -6,14 +6,19 @@ guarantees - a typo in a column name or a broken window-function partition
 would only show up by actually running the query. These tests create real
 AccessEvent/Employee rows and assert on the computed aggregates, not just
 status codes.
+
+All test classes authenticate via AuthenticatedAPITestCase (core/test_utils.py) -
+DEFAULT_PERMISSION_CLASSES=[IsAuthenticated] (config/settings.py) now guards
+this endpoint too, so an unauthenticated self.client would just get 401
+before any of the report logic under test ever ran.
 """
 from datetime import datetime, timezone as dt_timezone
 
 from rest_framework import status
-from rest_framework.test import APITestCase
 
 from cards.models import Employee
 from core.models import AccessEvent
+from core.test_utils import AuthenticatedAPITestCase
 
 # Fixed instant chosen so that both the check-in and check-out below land on
 # the same Europe/Istanbul calendar day (default REPORT_TZ, UTC+3) - the
@@ -23,7 +28,7 @@ CHECK_IN_TS = int(datetime(2024, 1, 15, 12, 0, 0, tzinfo=dt_timezone.utc).timest
 CHECK_OUT_TS = CHECK_IN_TS + 3600  # 1 hour later
 
 
-class PdksReportValidationTests(APITestCase):
+class PdksReportValidationTests(AuthenticatedAPITestCase):
     def test_missing_start_or_end_ts_returns_400(self):
         response = self.client.get("/api/reports/pdks")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
@@ -38,8 +43,9 @@ class PdksReportValidationTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
 
-class PdksReportComputationTests(APITestCase):
+class PdksReportComputationTests(AuthenticatedAPITestCase):
     def setUp(self):
+        super().setUp()
         self.employee = Employee.objects.create(full_name="Rear Admiral Hopper", department="Engineering")
         self.other_employee = Employee.objects.create(full_name="Someone Else")
 

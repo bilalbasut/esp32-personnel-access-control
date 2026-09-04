@@ -10,30 +10,21 @@ from cards.serializers import (
     CardOnboardSerializer, CardAssignSerializer
 )
 from core.acl import publish_acl_update
+from core.audit_viewset import AuditedModelViewSet
 
 
-class EmployeeViewSet(viewsets.ModelViewSet):
+class EmployeeViewSet(AuditedModelViewSet, viewsets.ModelViewSet):
+    # perform_create/update/destroy artık elle yazılmıyor - AuditedModelViewSet
+    # (core/audit_viewset.py) created_by/updated_by/deleted_by'ı set edip
+    # alan-bazlı diff'i AuditLog'a otomatik yazıyor. instance.delete() hâlâ
+    # soft-delete (bkz. core/models.py BaseModel) - bu employee'yi referans
+    # alan access event'leri ve kart geçmişi, "yok olmuş" bir satıra işaret
+    # etmek yerine hâlâ anlamlı/açıklanabilir kalıyor.
     queryset = Employee.objects.all().order_by("full_name")
     serializer_class = EmployeeSerializer
 
-    def perform_create(self, serializer):
-        employee = serializer.save()
-        log_action(self.request, "employee.create", f"Employee {employee.full_name} (#{employee.id})")
 
-    def perform_update(self, serializer):
-        employee = serializer.save()
-        log_action(self.request, "employee.update", f"Employee {employee.full_name} (#{employee.id})")
-
-    def perform_destroy(self, instance):
-        # instance.delete() soft-delete yapıyor - bkz. core/models.py
-        # SoftDeletableModel. Bu employee'yi referans alan access event'leri
-        # ve kart geçmişi, "yok olmuş" bir satıra işaret etmek yerine hâlâ
-        # anlamlı/açıklanabilir kalıyor.
-        instance.delete()
-        log_action(self.request, "employee.delete", f"Employee {instance.full_name} (#{instance.id})")
-
-
-class CardViewSet(viewsets.ModelViewSet):
+class CardViewSet(AuditedModelViewSet, viewsets.ModelViewSet):
     queryset = Card.objects.select_related("employee").all().order_by("uid")
     serializer_class = CardSerializer
     lookup_field = "uid"
@@ -62,23 +53,24 @@ class CardViewSet(viewsets.ModelViewSet):
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     def perform_create(self, serializer):
-        card = serializer.save()
-        log_action(self.request, "card.create", f"Card {card.uid}")
-        if card.is_active:
+        # created_by set etmek + audit log yazmak için AuditedModelViewSet'e
+        # (core/audit_viewset.py) devrediyor, ardından ACL yayınını (bu
+        # mixin'in bilmediği, karta özgü bir yan etki) elle tetikliyor.
+        super().perform_create(serializer)
+        if serializer.instance.is_active:
             publish_acl_update()
 
     def perform_update(self, serializer):
-        card = serializer.save()
-        log_action(self.request, "card.update", f"Card {card.uid}")
+        super().perform_update(serializer)
         publish_acl_update()
 
     def perform_destroy(self, instance):
-        # instance.delete() soft-delete yapıyor ve ayrıca is_active=False'a
-        # çekiyor (bkz. cards/models.py Card.delete()) - kartın uid'sini hâlâ
-        # referans alan her şey için (access event, audit log) geçmişi
-        # koruyor, aynı anda kartı ACL buffer'ından hemen düşürüyor.
-        instance.delete()
-        log_action(self.request, "card.delete", f"Card {instance.uid}")
+        # AuditedModelViewSet.perform_destroy() instance.delete()'i çağırıyor
+        # - bu da soft-delete yapıp ayrıca is_active=False'a çekiyor (bkz.
+        # cards/models.py Card.delete()) - kartın uid'sini hâlâ referans alan
+        # her şey için (access event, audit log) geçmişi koruyor, aynı anda
+        # kartı ACL buffer'ından hemen düşürüyor.
+        super().perform_destroy(instance)
         publish_acl_update()
 
     @action(detail=False, methods=["post"], url_path="add")

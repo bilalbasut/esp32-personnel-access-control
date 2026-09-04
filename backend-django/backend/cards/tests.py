@@ -1,4 +1,5 @@
-"""Backend test suite - card onboarding/assign/revoke.
+"""Backend test suite - card onboarding/assign/revoke, and (CardAttributionTests)
+created_by/updated_by/deleted_by + AuditLog attribution through CardViewSet.
 
 These exercise CardViewSet's custom actions (cards/views.py) end-to-end
 through the real URL routing, since that's where the riskiest logic lives:
@@ -12,18 +13,24 @@ via paho-mqtt (core/mqtt_utils.py), and there's no broker running under
 a successful mutation, not the MQTT wire format (core/acl.py's
 build_acl_buffer() would be the place for that, if/when it gets its own
 test).
+
+All test classes authenticate via AuthenticatedAPITestCase (core/test_utils.py) -
+DEFAULT_PERMISSION_CLASSES=[IsAuthenticated] (config/settings.py) now guards
+every one of these endpoints, so an unauthenticated self.client would just
+get 401 before any of the actual logic under test ever ran.
 """
 from unittest.mock import patch
 
 from rest_framework import status
-from rest_framework.test import APITestCase
 
 from accounts.models import AuditLog
 from cards.models import Card, Employee
+from core.test_utils import AuthenticatedAPITestCase
 
 
-class CardOnboardTests(APITestCase):
+class CardOnboardTests(AuthenticatedAPITestCase):
     def setUp(self):
+        super().setUp()
         patcher = patch("cards.views.publish_acl_update")
         self.mock_publish = patcher.start()
         self.addCleanup(patcher.stop)
@@ -68,8 +75,9 @@ class CardOnboardTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
 
-class CardAssignTests(APITestCase):
+class CardAssignTests(AuthenticatedAPITestCase):
     def setUp(self):
+        super().setUp()
         patcher = patch("cards.views.publish_acl_update")
         self.mock_publish = patcher.start()
         self.addCleanup(patcher.stop)
@@ -124,8 +132,9 @@ class CardAssignTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
 
-class CardRevokeTests(APITestCase):
+class CardRevokeTests(AuthenticatedAPITestCase):
     def setUp(self):
+        super().setUp()
         patcher = patch("cards.views.publish_acl_update")
         self.mock_publish = patcher.start()
         self.addCleanup(patcher.stop)
@@ -150,8 +159,9 @@ class CardRevokeTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
 
-class CardCreateAndSoftDeleteTests(APITestCase):
+class CardCreateAndSoftDeleteTests(AuthenticatedAPITestCase):
     def setUp(self):
+        super().setUp()
         patcher = patch("cards.views.publish_acl_update")
         self.mock_publish = patcher.start()
         self.addCleanup(patcher.stop)
@@ -187,7 +197,7 @@ class CardCreateAndSoftDeleteTests(APITestCase):
         self.mock_publish.assert_called_once()
 
 
-class EmployeeSoftDeleteTests(APITestCase):
+class EmployeeSoftDeleteTests(AuthenticatedAPITestCase):
     def test_delete_soft_deletes_and_hides_from_list(self):
         employee = Employee.objects.create(full_name="Katherine Johnson")
 
@@ -200,3 +210,87 @@ class EmployeeSoftDeleteTests(APITestCase):
 
         preserved = Employee.all_objects.get(id=employee.id)
         self.assertIsNotNone(preserved.deleted_at)
+        self.assertEqual(preserved.deleted_by_id, self.operator.id)
+
+
+class EmployeeAttributionTests(AuthenticatedAPITestCase):
+    """EmployeeViewSet has no custom perform_*() at all (cards/views.py) -
+    it gets 100% of its attribution/audit behaviour from AuditedModelViewSet.
+    Covering it separately from Card confirms the mixin works stand-alone,
+    not just when a subclass calls super()."""
+
+    def test_create_sets_created_by_and_writes_audit_log(self):
+        response = self.client.post(
+            "/api/employees", {"full_name": "Hedy Lamarr", "department": "R&D"}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+
+        employee = Employee.objects.get(full_name="Hedy Lamarr")
+        self.assertEqual(employee.created_by_id, self.operator.id)
+
+        entry = AuditLog.objects.get(action="employee.create")
+        self.assertEqual(entry.operator_id, self.operator.id)
+        self.assertEqual(entry.details["changes"]["full_name"]["new"], "Hedy Lamarr")
+
+    def test_update_sets_updated_by_and_logs_only_the_changed_field(self):
+        employee = Employee.objects.create(full_name="Grace Hopper", department="Navy")
+
+        response = self.client.patch(
+            f"/api/employees/{employee.id}", {"department": "Engineering"}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+        employee.refresh_from_db()
+        self.assertEqual(employee.department, "Engineering")
+        self.assertEqual(employee.updated_by_id, self.operator.id)
+        self.assertIsNone(employee.created_by_id)  # created directly via ORM, not through the API
+
+        entry = AuditLog.objects.get(action="employee.update")
+        self.assertEqual(
+            entry.details["changes"], {"department": {"old": "Navy", "new": "Engineering"}}
+        )
+        self.assertNotIn("full_name", entry.details["changes"])
+
+
+class CardAttributionTests(AuthenticatedAPITestCase):
+    """CardViewSet overrides perform_create/update/destroy to also publish
+    ACL updates (cards/views.py), each calling super().perform_x() first -
+    these confirm that wrapping didn't lose the AuditedModelViewSet
+    attribution/audit-log behaviour underneath, i.e. Card mutations still
+    "hold operator info" exactly like the unwrapped Device/Employee ones."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = patch("cards.views.publish_acl_update")
+        self.mock_publish = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_create_sets_created_by(self):
+        response = self.client.post("/api/cards", {"uid": "ATTR0001"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+
+        card = Card.objects.get(uid="ATTR0001")
+        self.assertEqual(card.created_by_id, self.operator.id)
+        self.assertTrue(AuditLog.objects.filter(action="card.create").exists())
+
+    def test_update_sets_updated_by_and_logs_the_diff(self):
+        card = Card.objects.create(uid="ATTR0002", floors="1", is_active=True)
+
+        response = self.client.patch(f"/api/cards/{card.uid}", {"floors": "1,2"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+        card.refresh_from_db()
+        self.assertEqual(card.updated_by_id, self.operator.id)
+
+        entry = AuditLog.objects.get(action="card.update")
+        self.assertEqual(entry.details["changes"]["floors"], {"old": "1", "new": "1,2"})
+
+    def test_delete_sets_deleted_by(self):
+        card = Card.objects.create(uid="ATTR0003", is_active=True)
+
+        response = self.client.delete(f"/api/cards/{card.uid}")
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+
+        preserved = Card.all_objects.get(uid="ATTR0003")
+        self.assertEqual(preserved.deleted_by_id, self.operator.id)
+        self.assertTrue(AuditLog.objects.filter(action="card.delete").exists())

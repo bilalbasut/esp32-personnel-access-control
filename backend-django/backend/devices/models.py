@@ -1,9 +1,9 @@
 from django.db import models
 
-from core.models import TimestampedModel
+from core.models import BaseModel
 
 
-class Device(TimestampedModel):
+class Device(BaseModel):
     id = models.CharField(max_length=50, primary_key=True)
     name = models.CharField(max_length=100, null=True, blank=True)
     floor = models.IntegerField(null=True, blank=True)
@@ -29,3 +29,9 @@ class Device(TimestampedModel):
 
     class Meta:
         db_table = "devices"
+
+    def __str__(self):
+        # AuditLog'daki target_repr için (core/audit_viewset.py) - eski
+        # elle yazılan log_action() çağrılarındaki f"Device {id} ({name})"
+        # formatıyla aynı okunabilirliği koruyor.
+        return f"{self.id} ({self.name})" if self.name else self.id

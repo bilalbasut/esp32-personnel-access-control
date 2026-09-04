@@ -1,9 +1,45 @@
 <script setup>
-import { RouterLink, RouterView } from 'vue-router';
+import { ref, onMounted, watch } from 'vue';
+import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router';
+import { api, isAuthenticated } from './api';
+
+const route = useRoute();
+const router = useRouter();
+const me = ref(null);
+
+// /login kendi tam ekran tasarımını çiziyor (bkz. LoginView.vue) - şirket
+// sidebar'ı sadece giriş yapılmış sayfalarda anlamlı.
+const isLoginRoute = () => route.name === 'Login';
+
+const loadMe = async () => {
+  if (isLoginRoute() || !isAuthenticated()) {
+    me.value = null;
+    return;
+  }
+  try {
+    me.value = await api.getMe();
+  } catch {
+    me.value = null;
+  }
+};
+
+onMounted(loadMe);
+watch(() => route.fullPath, loadMe);
+
+const logout = async () => {
+  try {
+    await api.logout();
+  } finally {
+    router.push({ name: 'Login' });
+  }
+};
 </script>
 
 <template>
-  <div class="d-flex vh-100 bg-light">
+  <div v-if="isLoginRoute()" class="vh-100">
+    <RouterView />
+  </div>
+  <div v-else class="d-flex vh-100 bg-light">
     <!-- Corporate Sidebar Navigation -->
     <aside class="sidebar d-flex flex-column flex-shrink-0 text-white p-3">
       <div class="d-flex align-items-center mb-4 px-2">
@@ -52,8 +88,13 @@ import { RouterLink, RouterView } from 'vue-router';
         </li>
       </ul>
       <div class="px-2 py-2 mt-auto border-top border-secondary small text-white-50">
-        <div class="fw-semibold text-white">GATE-K3 Fleet</div>
-        <div style="font-size: 0.75rem;">Status: Operational</div>
+        <div v-if="me" class="mb-2">
+          <div class="fw-semibold text-white">{{ me.username }}</div>
+          <div style="font-size: 0.75rem;" class="text-capitalize">{{ me.role }}</div>
+        </div>
+        <button type="button" class="btn btn-outline-light btn-sm w-100" @click="logout">
+          Log out
+        </button>
       </div>
     </aside>
 

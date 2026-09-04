@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -26,7 +27,13 @@ INSTALLED_APPS = [
     "django.contrib.admin",
     "corsheaders",
     "rest_framework",
-    "rest_framework.authtoken",
+    # rest_framework.authtoken (tek, süresi dolmayan opak token) JWT'ye
+    # geçişle birlikte KALDIRILDI - bkz. SIMPLE_JWT ve aşağıdaki
+    # DEFAULT_AUTHENTICATION_CLASSES. token_blacklist, logout'ta refresh
+    # token'ı gerçekten geçersiz kılabilmek için gerekli (bkz. accounts/views.py
+    # LogoutView) - kendi migration'larını getiriyor (OutstandingToken/
+    # BlacklistedToken tabloları).
+    "rest_framework_simplejwt.token_blacklist",
     "core",
     "devices",
     "cards",
@@ -45,19 +52,23 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.MultiPartParser",
         "rest_framework.parsers.FormParser",
     ],
-    # Gönderilmişse giriş yapmış bir Operator'ü tanır (POST /api/auth/login
-    # token'ı ya da admin session cookie'si üzerinden), böylece request.user
-    # gerçek olur ve audit logging kimin ne yaptığını kaydedebilir - bkz.
-    # accounts/audit.py. Endpoint'ler henüz login'in arkasına kilitlenmedi
-    # (DRF'in kendi default'uyla hâlâ fiilen AllowAny): Vue frontend henüz
-    # kimlik bilgisi göndermiyor, DEFAULT_PERMISSION_CLASSES'ı bugün
-    # IsAuthenticated'a çevirmek mevcut her isteği kırardı. Frontend yeniden
-    # yazımı operatörleri giriş yaptırmaya başladığında bu değiştirilecek -
-    # o ana kadar request.user Operator-ya-da-None, anonim istekler için
-    # audit kayıtları "system" olarak düşüyor.
+    # JWT (access + refresh, bkz. SIMPLE_JWT altta) artık ana auth yöntemi -
+    # eski, süresi hiç dolmayan opak TokenAuthentication kaldırıldı.
+    # SessionAuthentication sadece admin login'i ve DRF'in browsable
+    # API'sindeki "Log in" linki için hâlâ duruyor, Vue frontend'i
+    # ilgilendirmiyor.
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework.authentication.TokenAuthentication",
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
         "rest_framework.authentication.SessionAuthentication",
+    ],
+    # Artık zorunlu: önceden hiçbir endpoint login'in arkasına kilitli
+    # değildi (frontend henüz kimlik bilgisi göndermiyordu, o yüzden bu
+    # bilinçli olarak fiilen AllowAny bırakılmıştı). Login sayfası/JWT ile
+    # birlikte geldi - artık login/refresh/logout dışındaki HER endpoint
+    # kimlik doğrulaması istiyor (o üç view kendi permission_classes'ında
+    # AllowAny ile açıkça override ediyor, bkz. accounts/views.py).
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
     ],
     "UNAUTHENTICATED_USER": None,
     # Kapatıldı: DRF'in kendi ?format= query param'ı (JSON mu browsable API
@@ -67,6 +78,28 @@ REST_FRAMEWORK = {
     # ve view hiç çalışmadan 404 dönüyor. Bu projede başka hiçbir yer ?format=
     # override'ına ihtiyaç duymuyor, o yüzden kapatmak güvenli.
     "URL_FORMAT_OVERRIDE": None,
+}
+
+# Access token kısa ömürlü (15dk) ve stateless - süresi dolunca sunucu
+# tarafında ayrıca "silinmesine" gerek yok, kendiliğinden geçersiz olur.
+# Refresh token daha uzun ömürlü (7 gün) ama BLACKLIST_AFTER_ROTATION +
+# ROTATE_REFRESH_TOKENS ile her /api/auth/refresh çağrısında eskisi
+# geçersiz kılınıp yenisi veriliyor (bir refresh token'ın çalınıp süresiz
+# tekrar tekrar kullanılabilmesini engelliyor) - logout'ta da aynı
+# blacklist mekanizması kullanılıyor (bkz. accounts/views.py LogoutView):
+# refresh token'ı elle blacklist'e ekleyip "artık kullanılamaz" hale
+# getiriyor. Access token'ın kendisi logout'ta TERSİNE ÇEVRİLEMEZ (stateless,
+# imzası hâlâ geçerli) - bu yüzden ömrü bilerek kısa tutuldu, en kötü
+# ihtimalle logout sonrası 15 dakika daha geçerli kalabilir.
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
+    "UPDATE_LAST_LOGIN": True,
+    "AUTH_HEADER_TYPES": ("Bearer",),
+    "USER_ID_FIELD": "id",
+    "USER_ID_CLAIM": "user_id",
 }
 
 MIDDLEWARE = [
