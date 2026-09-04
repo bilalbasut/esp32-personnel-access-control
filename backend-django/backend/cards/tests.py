@@ -21,6 +21,7 @@ get 401 before any of the actual logic under test ever ran.
 """
 from unittest.mock import patch
 
+from django.test import TestCase
 from rest_framework import status
 
 from accounts.models import AuditLog
@@ -294,3 +295,82 @@ class CardAttributionTests(AuthenticatedAPITestCase):
         preserved = Card.all_objects.get(uid="ATTR0003")
         self.assertEqual(preserved.deleted_by_id, self.operator.id)
         self.assertTrue(AuditLog.objects.filter(action="card.delete").exists())
+
+
+class CardValidationTests(AuthenticatedAPITestCase):
+    """CardSerializer.validate() (cards/serializers.py) - floors must be
+    integers in 0-31 (a physical floor-relay bit mask, see core/acl.py
+    build_acl_buffer()), and win_start_m/win_end_m must be a proper
+    ascending pair inside a single day (0-1440 minutes)."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = patch("cards.views.publish_acl_update")
+        self.mock_publish = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_floor_above_31_returns_400(self):
+        response = self.client.post("/api/cards", {"uid": "VALID001", "floors": "1,32"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Card.objects.filter(uid="VALID001").exists())
+
+    def test_negative_floor_returns_400(self):
+        response = self.client.post("/api/cards", {"uid": "VALID002", "floors": "-1"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_win_start_not_before_win_end_returns_400(self):
+        response = self.client.post(
+            "/api/cards", {"uid": "VALID003", "win_start_m": 900, "win_end_m": 800}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_win_end_beyond_one_day_returns_400(self):
+        response = self.client.post(
+            "/api/cards", {"uid": "VALID004", "win_start_m": 0, "win_end_m": 1500}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_valid_floors_and_window_are_accepted(self):
+        response = self.client.post(
+            "/api/cards",
+            {"uid": "VALID005", "floors": "0,15,31", "win_start_m": 480, "win_end_m": 1020},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        card = Card.objects.get(uid="VALID005")
+        self.assertEqual(card.win_start_m, 480)
+        self.assertEqual(card.win_end_m, 1020)
+
+
+class SoftDeleteBehaviorTests(TestCase):
+    """Model-layer tests for BaseModel's soft-delete machinery (core/models.py)
+    - no HTTP involved, these go straight at the ORM to pin down guarantees
+    the model docstrings themselves claim."""
+
+    def test_restore_clears_deleted_at_and_reappears_in_default_manager(self):
+        employee = Employee.objects.create(full_name="Restorable Person")
+        employee.delete()
+        self.assertFalse(Employee.objects.filter(id=employee.id).exists())  # ActiveManager hides it
+
+        employee.restore()
+        self.assertTrue(Employee.objects.filter(id=employee.id).exists())
+        self.assertIsNone(Employee.objects.get(id=employee.id).deleted_at)
+
+    def test_hard_deleting_employee_nulls_a_soft_deleted_cards_employee_fk(self):
+        """Employee.Meta.base_manager_name = "all_objects" (cards/models.py)
+        exists for exactly this scenario: Django's on_delete=SET_NULL
+        cascade collector walks related rows using the model's *base*
+        manager - if that were the default (filtered) manager instead, a
+        Card that was ALREADY soft-deleted before the Employee got
+        hard-deleted would be invisible to the collector, and its
+        employee_id would be left dangling at a since-hard-deleted row."""
+        employee = Employee.objects.create(full_name="Ada Lovelace")
+        card = Card.objects.create(uid="HARDDEL01", employee=employee, is_active=True)
+
+        card.delete()  # soft-delete the card FIRST
+        self.assertIsNotNone(Card.all_objects.get(uid="HARDDEL01").deleted_at)
+
+        employee.hard_delete()  # a REAL DELETE FROM employees, not soft-delete
+
+        preserved_card = Card.all_objects.get(uid="HARDDEL01")
+        self.assertIsNone(preserved_card.employee_id)
