@@ -41,20 +41,19 @@ class CardSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
-        # A freshly-registered card with no employee attached must not grant
-        # access by default. The model's `is_active` default is True (needed
-        # so `assign`/onboard, which set it explicitly, keep working), so we
-        # only apply the inactive-until-assigned rule here: when the caller
-        # didn't send "is_active" explicitly AND didn't attach an employee,
-        # force is_active=False. This restores the original server.js
-        # behavior for the plain POST /api/cards path.
+        # Employee bağlanmamış yeni bir kart varsayılan olarak erişim
+        # açmamalı. Model tarafında `is_active` default'u True (assign/onboard
+        # bunu bilerek set ettiği için True kalmalı) - o yüzden bu kısıtı
+        # sadece burada uyguluyoruz: çağıran "is_active"ı açıkça göndermediyse
+        # VE employee bağlamadıysa is_active=False'a zorla. Bu, düz
+        # POST /api/cards yolu için eski server.js davranışını koruyor.
         if "is_active" not in self.initial_data and validated_data.get("employee") is None:
             validated_data["is_active"] = False
         return super().create(validated_data)
 
 
 class CardOnboardSerializer(serializers.Serializer):
-    """Handles the legacy /cards/add endpoint: creates employee and card simultaneously."""
+    """Eski /cards/add endpoint'i - employee ve kartı aynı anda oluşturur."""
     full_name = serializers.CharField(max_length=255)
     department = serializers.CharField(max_length=100, required=False, allow_blank=True, default="")
     uid = serializers.CharField(max_length=50)

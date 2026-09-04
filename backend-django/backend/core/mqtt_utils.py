@@ -1,8 +1,8 @@
-"""Thin wrapper around paho-mqtt's one-shot publish helper, used for
-transient command publishes (open/sync/reboot/settime/ota) that server.js
-sent over its single long-lived mqtt client. A short-lived connection per
-publish is simpler to reason about from a request/response web process and
-is cheap enough for this traffic volume."""
+"""paho-mqtt'nin tek seferlik publish yardımcısı üzerine ince bir sarmalayıcı
+- server.js'in tek, uzun ömürlü mqtt client'ı üzerinden gönderdiği geçici
+komut publish'leri (open/sync/reboot/settime/ota) için kullanılıyor. Bir
+request/response web sürecinden düşünmek için publish başına kısa ömürlü bir
+bağlantı daha basit, ve bu trafik hacmi için maliyeti önemsiz."""
 import paho.mqtt.publish as mqtt_publish
 from django.conf import settings
 

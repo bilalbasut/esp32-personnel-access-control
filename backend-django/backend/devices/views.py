@@ -16,15 +16,13 @@ from devices.serializers import DeviceCommandSerializer, DeviceOTASerializer, De
 
 
 def _next_cmd_seq():
-    """Pulls from the 'cmd_sequence' Postgres sequence (created in
-    core's migrations) instead of a module-level itertools.count(). The
-    in-process counter only works correctly with exactly one worker
-    process - under `gunicorn --workers N` (the README's own suggested
-    production command), each worker gets its own counter starting from
-    its own import time, so different requests handled by different
-    workers hand out overlapping/colliding seq numbers. A DB sequence is
-    the actual fix, and mirrors how core/acl.py already sources ACL
-    versions the same way."""
+    """Modül seviyesinde bir itertools.count() yerine core'un migration'larında
+    oluşturulmuş 'cmd_sequence' Postgres sequence'inden çekiyor. Process-içi
+    sayaç sadece TEK worker process'te doğru çalışır - README'nin önerdiği
+    `gunicorn --workers N` altında her worker kendi import anından başlayan
+    kendi sayacına sahip olur, yani farklı worker'ların işlediği istekler
+    çakışan/tekrar eden seq numaraları dağıtır. Asıl çözüm bir DB sequence -
+    core/acl.py'nin ACL versiyonlarını zaten aynı şekilde kaynaklamasıyla aynı mantık."""
     with connection.cursor() as cursor:
         cursor.execute("SELECT nextval('cmd_sequence')")
         return cursor.fetchone()[0]
@@ -49,7 +47,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="command")
     def send_command(self, request, *args, **kwargs):
-        """Dispatches operational hardware commands (open, sync, reboot) to the ESP32."""
+        """Operasyonel donanım komutlarını (open, sync, reboot) ESP32'ye gönderir."""
         serializer = DeviceCommandSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -82,7 +80,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="ota")
     def ota(self, request, *args, **kwargs):
-        """Dispatches an OTA firmware update command with checksum and binary URL."""
+        """Checksum ve binary URL ile bir OTA firmware güncelleme komutu gönderir."""
         device = self.get_object()
         serializer = DeviceOTASerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -94,7 +92,7 @@ class DeviceViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Normalize version string to tolerate leading 'v'
+        # Başındaki 'v' harfini tolere etmek için versiyon string'ini normalize et
         clean_version = raw_version.lstrip("v")
         fw = (
             Firmware.objects.filter(version=raw_version).first()

@@ -24,15 +24,15 @@ from core.serializers import (
 
 class EventViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     """
-    Replaces GET /api/events with a read-only ViewSet.
-    Maintains the 50 most recent events hydrated with employee info.
+    GET /api/events yerine geçen read-only bir ViewSet.
+    En yeni 50 event'i employee bilgisiyle zenginleştirilmiş halde tutar.
 
-    Deliberately list-only (not ReadOnlyModelViewSet): get_queryset() below
-    returns a RawQuerySet, which has no .filter()/.get() support. Router
-    detail routes (GET /api/events/<pk>) call get_object() -> filter by pk,
-    which would crash with AttributeError on this queryset - the same
-    reason FirmwareViewSet above is ListModelMixin-only instead of
-    ReadOnlyModelViewSet.
+    Bilinçli olarak sadece list (ReadOnlyModelViewSet değil): aşağıdaki
+    get_queryset() bir RawQuerySet döndürüyor, bunun .filter()/.get()
+    desteği yok. Router'ın detail route'ları (GET /api/events/<pk>)
+    get_object() -> pk'ye göre filtrele çağırır, bu da bu queryset üzerinde
+    AttributeError ile patlardı - aşağıdaki FirmwareViewSet'in de
+    ReadOnlyModelViewSet yerine sadece ListModelMixin olmasının sebebi aynı.
     """
     serializer_class = AccessEventSerializer
 
@@ -49,12 +49,13 @@ class EventViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
 
 class FirmwareViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     """
-    Handles firmware registry listing, uploads, and raw binary streaming for ESP32 OTA.
+    Firmware registry listelemesi, upload'lar ve ESP32 OTA için ham binary
+    streaming'i yönetir.
     """
     queryset = Firmware.objects.all().order_by("-uploaded_at")
     serializer_class = FirmwareSerializer
     lookup_field = "version"
-    lookup_value_regex = r"[^/]+"  # CRITICAL: Allows dots in version strings (e.g. 1.9.3)
+    lookup_value_regex = r"[^/]+"  # ÖNEMLİ: versiyon string'lerinde nokta olmasına izin verir (örn. 1.9.3)
 
     @action(
         detail=False,
@@ -118,7 +119,7 @@ class FirmwareViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # FileResponse sets Content-Length and streams in binary chunks
+        # FileResponse Content-Length'i set eder ve binary parçalar halinde stream eder
         response = FileResponse(open(file_path, "rb"), content_type="application/octet-stream")
         response["Content-Length"] = os.path.getsize(file_path)
         return response
@@ -126,8 +127,8 @@ class FirmwareViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
 
 class PdksReportView(APIView):
     """
-    Replaces GET /api/reports/pdks.
-    Generates daily first-in/last-out aggregates and computes zone time.
+    GET /api/reports/pdks yerine geçer.
+    Günlük ilk-giriş/son-çıkış toplamlarını üretir ve bölge (zone) sürelerini hesaplar.
     """
     def get(self, request):
         start_ts = request.query_params.get("start_ts")
@@ -152,6 +153,11 @@ class PdksReportView(APIView):
                 )
 
         sql = """
+        -- Zone, device_id ÖNEKİNE (prefix) göre belirleniyor - K3=ana giriş,
+        -- K2=mola odası, K1=yemekhane. -01/-02 gibi sonek numaraları zone'u
+        -- etkilemez (bkz. `LIKE 'GATE-K3-%%'`, tam eşleşme değil) - aynı
+        -- K-önekindeki tüm cihazlar aynı zone sayılır. Giriş/çıkış yönü de
+        -- buradan gelmiyor; onu ayrı olarak aşağıdaki a.dir kolonu belirler.
         WITH tagged_events AS (
             SELECT
                 a.employee_id,
@@ -167,7 +173,7 @@ class PdksReportView(APIView):
                 a.result
             FROM access_events a
             WHERE a.ts_utc >= %s AND a.ts_utc <= %s
-              AND a.result IN (0, 4)
+              AND a.result IN (0, 4)  -- sadece granted(0) ve manual(4) - unknown/expired/schedule rapora hiç girmiyor
               AND (%s::int IS NULL OR a.employee_id = %s::int)
         ),
         event_pairs AS (

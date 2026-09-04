@@ -3,11 +3,11 @@ from django.utils import timezone
 
 
 class TimestampedModel(models.Model):
-    """Base for models that should track row creation/update times.
-    `created_at` is set once on insert; `updated_at` refreshes on every
-    save(). Skip this base for append-only/event-log tables where rows are
-    never updated after insert (see AccessEvent, which tracks its own
-    hardware/ingestion timestamps instead)."""
+    """Satırın oluşturulma/güncellenme zamanını tutması gereken modeller
+    için taban sınıf. `created_at` insert'te bir kere set edilir;
+    `updated_at` her save()'de yenilenir. Insert'ten sonra hiç güncellenmeyen
+    append-only/event-log tablolarında bu taban kullanılmıyor (bkz.
+    AccessEvent - o kendi donanım/ingestion zaman damgalarını kullanıyor)."""
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -16,8 +16,8 @@ class TimestampedModel(models.Model):
 
 
 class ActivatableModel(models.Model):
-    """Base for models with a simple active/inactive toggle instead of
-    hard-deleting rows (Employee, Card)."""
+    """Satırları hard-delete etmek yerine basit bir aktif/pasif anahtarına
+    ihtiyaç duyan modeller için taban (Employee, Card)."""
     is_active = models.BooleanField(default=True)
 
     class Meta:
@@ -25,38 +25,40 @@ class ActivatableModel(models.Model):
 
 
 class ActiveManager(models.Manager):
-    """Default manager for SoftDeletableModel: hides soft-deleted rows from
-    every normal queryset (list/detail views, FK traversal, admin list
-    pages) without anyone needing to remember to filter for it."""
+    """SoftDeletableModel'in default manager'ı: soft-delete edilmiş satırları
+    her normal queryset'ten (list/detail view'lar, FK gezinmesi, admin liste
+    sayfaları) hiç kimsenin ayrıca filtrelemeyi hatırlamasına gerek kalmadan
+    gizler."""
     def get_queryset(self):
         return super().get_queryset().filter(deleted_at__isnull=True)
 
 
 class SoftDeletableModel(models.Model):
-    """Base for models where "delete" should preserve history instead of
-    erasing it (Employee, Card). AccessEvent/AuditLog rows referencing a
-    since-removed card or employee stay explainable instead of pointing at
-    nothing - this is the direct fix for that gap.
+    """"Silme"nin geçmişi yok etmek yerine korumasını istediğimiz modeller
+    için taban (Employee, Card). Silinmiş bir karta/employee'ye referans
+    veren AccessEvent/AuditLog satırları hiçliğe işaret etmek yerine hâlâ
+    anlamlı kalıyor - bu sınıf tam olarak o boşluğu kapatıyor.
 
-    `objects` (the default manager) excludes soft-deleted rows everywhere.
-    `all_objects` is the explicit escape hatch for anything that genuinely
-    needs to see everything - an admin "show removed" view, an export, a
-    debugging query.
+    `objects` (default manager) soft-delete edilmiş satırları her yerde
+    dışarıda bırakır. `all_objects`, gerçekten her şeyi görmesi gereken
+    yerler için (admin'in "silinenleri göster" view'ı, bir export, debug
+    amaçlı sorgu) bilinçli olarak bırakılmış kaçış kapısı.
 
-    `.delete()` itself soft-deletes - this is what closes the gap that used
-    to exist here: every call site (views, admin bulk-delete, a future
-    management command, a shell session) got soft-delete behavior "for
-    free" purely by being written correctly, with nothing stopping a real
-    DELETE FROM if one of them forgot. Now the model enforces it. Use
-    `hard_delete()` for an actual, permanent DELETE FROM (data cleanup, a
-    deliberate purge) - it's the explicit, harder-to-reach-for escape hatch,
-    on purpose.
+    `.delete()`'in kendisi soft-delete yapıyor - burada kapatılan asıl açık
+    buydu: her çağıran yer (view'lar, admin toplu silme, ileride yazılacak
+    bir management command, bir shell oturumu) sadece "doğru yazıldığı
+    için" soft-delete davranışını "bedava" alıyordu; biri unutursa gerçek
+    bir DELETE FROM'u hiçbir şey engellemiyordu. Artık bunu model
+    zorluyor. Gerçek, kalıcı bir DELETE FROM için (veri temizliği, bilinçli
+    bir purge) `hard_delete()` kullanılmalı - bilerek daha "elle uzanılan",
+    açık bir kaçış kapısı olarak bırakıldı.
 
-    No `update_fields` restriction on the save() below: a subclass that
-    overrides delete() to also flip another field first (see Card, which
-    deactivates itself so a deleted card stops granting access immediately
-    instead of waiting for something else to revoke it) needs the full
-    save() to persist that field too, not just deleted_at.
+    Aşağıdaki save()'de `update_fields` kısıtlaması YOK: delete()'i
+    override edip önce başka bir alanı da değiştiren bir alt sınıf (bkz.
+    Card - silinen kart erişim vermeyi başka bir şeyin onu iptal etmesini
+    beklemeden anında durdursun diye kendini de deaktive ediyor) o alanın da
+    kalıcı olması için save()'in tam çalışmasına ihtiyaç duyuyor, sadece
+    deleted_at'in değil.
     """
     deleted_at = models.DateTimeField(null=True, blank=True)
 
@@ -74,8 +76,8 @@ class SoftDeletableModel(models.Model):
         super().delete(*args, **kwargs)
 
     def soft_delete(self):
-        """Explicit alias for delete() - same behavior, for call sites that
-        want to say "soft delete" out loud rather than just ".delete()"."""
+        """delete() için açık bir alias - davranış aynı, sadece çağıran yer
+        ".delete()" yerine "soft delete" demek istediğinde kullanılıyor."""
         self.delete()
 
     def restore(self):
@@ -92,10 +94,10 @@ class Firmware(models.Model):
     filename = models.CharField(max_length=255)
     md5 = models.CharField(max_length=32)
     size = models.IntegerField()
-    # Explicit upload bookkeeping timestamp (unix epoch, set by
-    # FirmwareViewSet.upload_binary) rather than TimestampedModel's
-    # auto_now_add - keeping one authoritative "when" field here avoids two
-    # timestamps that could disagree.
+    # TimestampedModel'in auto_now_add'ı yerine bilinçli olarak elle set
+    # edilen bir upload zaman damgası (unix epoch, FirmwareViewSet.
+    # upload_binary tarafından set ediliyor) - tek bir yetkili "ne zaman"
+    # alanı, birbiriyle çelişebilecek iki zaman damgasını önlüyor.
     uploaded_at = models.BigIntegerField(null=True, blank=True)
 
     class Meta:
@@ -103,14 +105,15 @@ class Firmware(models.Model):
 
 
 class AccessEvent(models.Model):
-    """One row per door-access event reported by hardware, written by the
-    MQTT collector service (collector/collector.py), not through this
-    Django app. Deliberately NOT a real FK to Device/Employee/Card: this is
-    a high-frequency hardware event log, and rejecting an insert just
-    because a device or card hasn't been registered/synced yet would mean
-    losing real access events. Resolved at read time instead (see the
-    LEFT JOINs in EventViewSet and PdksReportView below). Indexed on the
-    columns those read-time joins/filters actually use."""
+    """Donanımın bildirdiği her kapı-geçiş olayı için bir satır - bu Django
+    uygulaması üzerinden değil, MQTT collector servisi (collector/
+    collector.py) tarafından yazılıyor. Bilinçli olarak Device/Employee/
+    Card'a gerçek bir FK DEĞİL: bu yüksek frekanslı bir donanım event
+    log'u, bir cihaz/kart henüz kayıtlı/senkron değil diye insert'i
+    reddetmek gerçek erişim olaylarının kaybolması demek olurdu. Bunun
+    yerine ilişkilendirme okuma anında yapılıyor (aşağıdaki EventViewSet ve
+    PdksReportView'daki LEFT JOIN'lere bakın). Index'ler de tam bu okuma
+    anındaki join/filtrelerin kullandığı kolonlar üzerinde."""
     device_id = models.CharField(max_length=50, null=True, blank=True, db_index=True)
     seq = models.IntegerField(null=True, blank=True)
     uid = models.CharField(max_length=50, null=True, blank=True)
@@ -120,15 +123,14 @@ class AccessEvent(models.Model):
     dir = models.SmallIntegerField(null=True, blank=True)
     result = models.SmallIntegerField(null=True, blank=True)
     mode = models.SmallIntegerField(null=True, blank=True)
-    # When the collector actually wrote this row (unix epoch) - distinct
-    # from ts_utc, which is the event's own hardware-reported time.
+    # collector'ın bu satırı gerçekten yazdığı an (unix epoch) - event'in
+    # kendi donanım-raporlu zamanı olan ts_utc'den farklı.
     ingested_at = models.BigIntegerField(null=True, blank=True)
-    # Safety net: the exact MQTT JSON payload this row was parsed from.
-    # Column-mapping bugs or a firmware update that adds a new field you
-    # haven't wired up yet would otherwise lose that data permanently -
-    # this lets you replay/backfill later instead. Nullable so existing
-    # rows (and any insert path that doesn't have the raw payload handy)
-    # aren't affected.
+    # Güvenlik ağı: bu satırın parse edildiği ham MQTT JSON payload'ı.
+    # Kolon-eşleme hataları ya da henüz bağlanmamış yeni bir firmware alanı
+    # olmasaydı bu veriyi kalıcı olarak kaybederdi - bu sayede ileride
+    # replay/backfill yapılabiliyor. Nullable, çünkü mevcut satırlar (ve ham
+    # payload'ı elinde olmayan hiçbir insert yolu) bundan etkilenmesin.
     raw_payload = models.JSONField(null=True, blank=True)
 
     class Meta:

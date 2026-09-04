@@ -1,16 +1,16 @@
-"""Small helper so every view that mutates something calls one function the
-same way, instead of each view constructing AuditLog rows by hand."""
+"""Bir şeyi değiştiren her view'ın AuditLog satırını elle kurmak yerine aynı
+fonksiyonu aynı şekilde çağırması için küçük bir yardımcı."""
 from accounts.models import AuditLog
 
 
 def log_action(request, action, target_repr="", details=None):
-    """Records a who-did-what entry for the current request.
+    """Mevcut request için bir "kim ne yaptı" kaydı oluşturur.
 
-    `operator` is None (recorded/shown as "system") when the request isn't
-    authenticated - which, as of this rollout, is every request until the
-    frontend starts sending a token. That's expected, not a bug: audit
-    coverage improves automatically as soon as operators start logging in,
-    with no further backend changes needed.
+    Request kimliklenmemişse `operator` None ("system" olarak gösterilir) -
+    ki bu rollout itibarıyla frontend token göndermeye başlayana kadar HER
+    request için geçerli. Bu bir bug değil, beklenen durum: operatörler
+    giriş yapmaya başladığı an audit kapsamı backend'de hiçbir ek değişiklik
+    gerekmeden kendiliğinden iyileşiyor.
     """
     user = getattr(request, "user", None)
     operator = user if user is not None and getattr(user, "is_authenticated", False) else None

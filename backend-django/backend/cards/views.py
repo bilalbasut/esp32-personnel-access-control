@@ -25,10 +25,10 @@ class EmployeeViewSet(viewsets.ModelViewSet):
         log_action(self.request, "employee.update", f"Employee {employee.full_name} (#{employee.id})")
 
     def perform_destroy(self, instance):
-        # instance.delete() soft-deletes - see SoftDeletableModel in
-        # core/models.py. Access events and card history that reference
-        # this employee stay explainable instead of pointing at a row
-        # that's simply gone.
+        # instance.delete() soft-delete yapıyor - bkz. core/models.py
+        # SoftDeletableModel. Bu employee'yi referans alan access event'leri
+        # ve kart geçmişi, "yok olmuş" bir satıra işaret etmek yerine hâlâ
+        # anlamlı/açıklanabilir kalıyor.
         instance.delete()
         log_action(self.request, "employee.delete", f"Employee {instance.full_name} (#{instance.id})")
 
@@ -39,14 +39,15 @@ class CardViewSet(viewsets.ModelViewSet):
     lookup_field = "uid"
 
     def create(self, request, *args, **kwargs):
-        """Overrides ModelViewSet.create() only to turn a duplicate-UID
-        IntegrityError into a clean 409 instead of an unhandled 500.
-        Deliberately NOT wrapped in transaction.atomic(): perform_create()
-        also fires the MQTT publish_acl_update() side effect, and an atomic
-        block here would roll back an already-inserted Card row if that
-        unrelated MQTT call happened to fail. A single Card.objects.create()
-        is already one statement, so autocommit alone is enough to catch
-        its IntegrityError cleanly without touching that transaction."""
+        """ModelViewSet.create()'i sadece tekrarlı UID'den gelen
+        IntegrityError'ı ham bir 500 yerine temiz bir 409'a çevirmek için
+        override ediyor. Bilinçli olarak transaction.atomic() İÇİNE
+        ALINMADI: perform_create() ayrıca MQTT publish_acl_update() yan
+        etkisini de tetikliyor; burada bir atomic blok, o ilgisiz MQTT
+        çağrısı başarısız olursa zaten eklenmiş Card satırını geri alırdı.
+        Tek bir Card.objects.create() zaten tek bir statement, yani
+        autocommit tek başına IntegrityError'ı bu transaction'a dokunmadan
+        yakalamaya yetiyor."""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
@@ -72,17 +73,17 @@ class CardViewSet(viewsets.ModelViewSet):
         publish_acl_update()
 
     def perform_destroy(self, instance):
-        # instance.delete() soft-deletes and also sets is_active=False (see
-        # Card.delete() in cards/models.py) - preserves the card's history
-        # for anything that still references its uid (access events, audit
-        # log), while immediately pulling it out of the ACL buffer.
+        # instance.delete() soft-delete yapıyor ve ayrıca is_active=False'a
+        # çekiyor (bkz. cards/models.py Card.delete()) - kartın uid'sini hâlâ
+        # referans alan her şey için (access event, audit log) geçmişi
+        # koruyor, aynı anda kartı ACL buffer'ından hemen düşürüyor.
         instance.delete()
         log_action(self.request, "card.delete", f"Card {instance.uid}")
         publish_acl_update()
 
     @action(detail=False, methods=["post"], url_path="add")
     def onboard(self, request):
-        """Replaces legacy POST /cards/add (Creates employee + card in 1 atomic step)"""
+        """Eski POST /cards/add yerine geçiyor (employee + kartı tek atomic adımda oluşturur)"""
         serializer = CardOnboardSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -108,8 +109,8 @@ class CardViewSet(viewsets.ModelViewSet):
                     is_active=True
                 )
         except IntegrityError:
-            # Pre-check above is racy under concurrent onboarding of the same
-            # UID; the DB's primary-key constraint is the real guard.
+            # Yukarıdaki ön-kontrol, aynı UID eşzamanlı onboard edilirse
+            # race'e açık; asıl güvence DB'nin primary-key constraint'i.
             return Response({"error": f"Card UID {uid} is already registered."}, status=status.HTTP_409_CONFLICT)
 
         log_action(
@@ -125,7 +126,7 @@ class CardViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["put"], url_path="assign")
     def assign(self, request, uid=None):
-        """Replaces PUT /cards/<uid>/assign"""
+        """PUT /cards/<uid>/assign yerine geçiyor"""
         card = self.get_object()
         serializer = CardAssignSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -156,7 +157,7 @@ class CardViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["post"], url_path="revoke")
     def revoke(self, request):
-        """Replaces legacy POST /cards/revoke"""
+        """Eski POST /cards/revoke yerine geçiyor"""
         uid = request.data.get("uid")
         if not uid:
             return Response({"error": "uid is required."}, status=status.HTTP_400_BAD_REQUEST)

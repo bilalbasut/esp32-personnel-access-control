@@ -5,12 +5,12 @@ from core.models import TimestampedModel
 
 
 class Operator(AbstractUser, TimestampedModel):
-    """The staff/operator identity for this system - the panel had no
-    concept of a logged-in user at all before this. Built on Django's
-    AbstractUser (battle-tested password hashing, the admin login form,
-    is_staff/is_superuser for admin access) rather than a bespoke model,
-    plus TimestampedModel for created_at/updated_at and a `role` field for
-    the coarse admin-vs-operator distinction this panel actually needs.
+    """Panelin operatör/kullanıcı kimliği - daha önce sistemde giriş yapmış
+    kullanıcı kavramı yoktu. Sıfırdan model yazmak yerine Django'nun
+    AbstractUser'ı üzerine kuruldu (hazır ve test edilmiş şifre hash'leme,
+    admin login formu, is_staff/is_superuser); TimestampedModel'den
+    created_at/updated_at, `role` alanından da bu panelin ihtiyaç duyduğu
+    kabaca admin/operator ayrımı geliyor.
     """
     ROLE_ADMIN = "admin"
     ROLE_OPERATOR = "operator"
@@ -30,17 +30,17 @@ class Operator(AbstractUser, TimestampedModel):
 
 
 class AuditLog(TimestampedModel):
-    """One row per meaningful mutation across the system - card/employee/
-    device/firmware changes - answering "who did what, and when". Kept
-    deliberately simple (a short action code + free-text target + a JSON
-    details blob) rather than a full generic-relation setup, since this is
-    for humans reading a history list, not for reconstructing exact
-    before/after model state.
+    """Sistemdeki her anlamlı değişiklik (kart/employee/device/firmware) için
+    bir satır - "kim, ne zaman, ne yaptı" sorusuna cevap veriyor. Bilinçli
+    olarak basit tutuldu (kısa bir action kodu + serbest metin target +
+    JSON details) - tam bir generic-relation altyapısı yerine, çünkü bu bir
+    geçmiş listesini okuyan insan için, model öncesi/sonrası tam state'i
+    geri kurmak için değil.
 
-    `operator` is nullable: a request made before the frontend sends
-    credentials, or a genuinely system-triggered action, has no operator to
-    attribute it to - those show as "system" rather than being silently
-    dropped or forced onto a fake user.
+    `operator` nullable: frontend henüz kimlik bilgisi göndermeden yapılan
+    bir istek, ya da gerçekten sistem tetikli bir aksiyon, hiçbir operatöre
+    atfedilemez - bunlar sessizce düşürülmek ya da sahte bir kullanıcıya
+    bağlanmak yerine "system" olarak gösteriliyor.
     """
     operator = models.ForeignKey(
         Operator, null=True, blank=True, on_delete=models.SET_NULL, related_name="audit_logs"

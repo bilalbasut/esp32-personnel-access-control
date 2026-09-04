@@ -1,7 +1,7 @@
 """
-Direct port of collector.js using paho-mqtt + psycopg2. Subscribes to the
-same topics, applies the same string->SMALLINT translation maps and
-timestamp sanity check, and writes to the same tables.
+collector.js'in paho-mqtt + psycopg2 kullanan birebir portu. Aynı topic'lere
+subscribe olur, aynı string->SMALLINT çeviri tablolarını ve zaman damgası
+mantık kontrolünü uygular, aynı tablolara yazar.
 """
 import json
 import os
@@ -15,8 +15,8 @@ import db
 MQTT_HOST = os.environ.get("MQTT_HOST", "127.0.0.1")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 
-# --- TRANSLATION MAPS ---
-# Converts ESP32 string payloads back into SMALLINT for PostgreSQL
+# --- ÇEVİRİ TABLOLARI ---
+# ESP32'nin string payload'larını PostgreSQL için SMALLINT'e çevirir
 MAP_RESULT = {"granted": 0, "unknown": 1, "expired": 2, "schedule": 3, "manual": 4}
 MAP_DIR = {"in": 0, "out": 1}
 MAP_MODE = {"online": 0, "offline": 1}
@@ -48,10 +48,10 @@ def handle_event(client, device_id, payload):
 
     now = now_s()
 
-    # Opportunistic presence/firmware tracking - "fw" only ever appears on
-    # event payloads, never on heartbeats, so this is the only place it can
-    # be captured. Runs regardless of whether the insert below turns out to
-    # be a duplicate, since it's just presence + version, not the event itself.
+    # Fırsatçı presence/firmware takibi - "fw" sadece event payload'larında
+    # görünür, heartbeat'lerde asla, yani bu değeri yakalayabileceğimiz tek
+    # yer burası. Aşağıdaki insert tekrar (duplicate) çıksa bile bu çalışır,
+    # çünkü bu sadece presence + versiyon, event'in kendisi değil.
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -65,19 +65,19 @@ def handle_event(client, device_id, payload):
     except Exception as err:
         print(f"Device fw/presence update error: {err}", flush=True)
 
-    # Translate strings to integers (defaulting to safe values if undefined)
-    res_int = MAP_RESULT.get(data.get("res"), 1)   # Default: 1 (unknown)
-    dir_int = MAP_DIR.get(data.get("dir"), 0)      # Default: 0 (in)
-    mode_int = MAP_MODE.get(data.get("mode"), 0)   # Default: 0 (online)
-    tsrc_int = MAP_TSRC.get(data.get("tsrc"), 2)   # Default: 2 (invalid)
+    # String'leri integer'a çevir (tanımsızsa güvenli değerlere düş)
+    res_int = MAP_RESULT.get(data.get("res"), 1)   # Varsayılan: 1 (unknown)
+    dir_int = MAP_DIR.get(data.get("dir"), 0)      # Varsayılan: 0 (in)
+    mode_int = MAP_MODE.get(data.get("mode"), 0)   # Varsayılan: 0 (online)
+    tsrc_int = MAP_TSRC.get(data.get("tsrc"), 2)   # Varsayılan: 2 (invalid)
 
     ts = data.get("ts")
-    # Sanity Check: If timestamp is in the future (>10 mins) or before 2025, flag as invalid
+    # Mantık kontrolü: zaman damgası gelecekte ise (>10 dk) ya da 2025'ten önceyse geçersiz say
     if ts is None or ts > (now + 600) or ts < 1735689600:
         print(f"[TIMESTAMP ANOMALY] Device {device_id} sent suspect ts: {ts}. Overriding tsrc to invalid.", flush=True)
         tsrc_int = 2  # TSRC_INVALID
 
-    # Find the employee_id associated with this UID
+    # Bu UID'ye bağlı employee_id'yi bul
     employee_id = None
     try:
         with conn.cursor() as cur:
@@ -93,9 +93,9 @@ def handle_event(client, device_id, payload):
         (device_id, seq, uid, employee_id, ts_utc, ts_source, dir, result, mode, ingested_at, raw_payload)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
     """
-    # Store the original payload alongside the parsed columns - a mapping
-    # bug or a firmware field we haven't wired up yet shouldn't mean the
-    # data is gone forever; this makes replay/backfill possible.
+    # Orijinal payload'ı parse edilmiş kolonların yanında da sakla - bir
+    # eşleme hatası ya da henüz bağlanmamış bir firmware alanı verinin
+    # sonsuza dek kaybolması demek olmamalı; bu replay/backfill'i mümkün kılar.
     values = (
         device_id, data.get("seq"), data.get("uid"), employee_id, ts, tsrc_int, dir_int, res_int, mode_int, now,
         json.dumps(data),
@@ -139,9 +139,8 @@ def handle_heartbeat(device_id, payload):
         hb = {}
         print("Invalid heartbeat JSON, storing presence only.", flush=True)
 
-    # Upsert (not a blind UPDATE) so a heartbeat that happens to arrive
-    # before this device's first /status message doesn't just silently
-    # touch zero rows and lose the data.
+    # Kör bir UPDATE değil upsert - bu cihazın ilk /status mesajından ÖNCE
+    # gelen bir heartbeat, sessizce sıfır satırı etkileyip veriyi kaybetmesin diye.
     query = """
         INSERT INTO devices (id, status, last_seen_at, queue_depth, heap_free, queue_overflow, uptime_s, created_at, updated_at)
         VALUES (%s, 'online', %s, %s, %s, %s, %s, NOW(), NOW())
@@ -171,11 +170,11 @@ def handle_heartbeat(device_id, payload):
 def handle_cmd_res(device_id, payload):
     print(f"[CMD RESULT] Device {device_id} responded: {payload}", flush=True)
 
-    # OTA responses (ota_downloading / ota_ok_rebooting / ota_failed / ...)
-    # get persisted so the panel can show update progress per device, same
-    # pattern as the heartbeat/fw tracking above. Other command responses
-    # (open_ok, rebooting, sync_triggered) are transient acks with nothing
-    # meaningful to store long-term.
+    # OTA yanıtları (ota_downloading / ota_ok_rebooting / ota_failed / ...)
+    # kalıcı olarak saklanıyor ki panel cihaz başına güncelleme ilerlemesini
+    # gösterebilsin - yukarıdaki heartbeat/fw takibiyle aynı desen. Diğer
+    # komut yanıtları (open_ok, rebooting, sync_triggered) geçici acklar,
+    # uzun vadede saklanacak anlamlı bir şey taşımıyorlar.
     if payload.startswith("ota_"):
         now = now_s()
         try:

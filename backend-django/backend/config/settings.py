@@ -16,10 +16,10 @@ ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.staticfiles",
-    # Added for real operator identity/audit (previously this API had no
-    # user model at all). auth+sessions+messages+admin is the standard
-    # bundle admin.site needs - see TEMPLATES below, which admin also
-    # requires and this project didn't have until now.
+    # Gerçek operatör kimliği/audit için eklendi (daha önce bu API'de hiç
+    # user modeli yoktu). auth+sessions+messages+admin, admin.site'ın
+    # ihtiyaç duyduğu standart paket - aşağıdaki TEMPLATES'e bakın, admin
+    # onu da gerektiriyor ve bu proje şimdiye kadar hiç kullanmıyordu.
     "django.contrib.auth",
     "django.contrib.sessions",
     "django.contrib.messages",
@@ -45,26 +45,27 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.MultiPartParser",
         "rest_framework.parsers.FormParser",
     ],
-    # Recognizes a logged-in Operator (via POST /api/auth/login token, or
-    # an admin session cookie) when one is sent, so request.user is real
-    # and audit logging can record who did what - see accounts/audit.py.
-    # Endpoints are NOT locked behind login yet (still effectively AllowAny
-    # by DRF's own default): the Vue frontend doesn't send credentials yet,
-    # and flipping DEFAULT_PERMISSION_CLASSES to IsAuthenticated today would
-    # just break every existing request. Do that once the frontend rewrite
-    # logs operators in - until then, request.user is Operator-or-None and
-    # audit entries record "system" for anonymous requests.
+    # Gönderilmişse giriş yapmış bir Operator'ü tanır (POST /api/auth/login
+    # token'ı ya da admin session cookie'si üzerinden), böylece request.user
+    # gerçek olur ve audit logging kimin ne yaptığını kaydedebilir - bkz.
+    # accounts/audit.py. Endpoint'ler henüz login'in arkasına kilitlenmedi
+    # (DRF'in kendi default'uyla hâlâ fiilen AllowAny): Vue frontend henüz
+    # kimlik bilgisi göndermiyor, DEFAULT_PERMISSION_CLASSES'ı bugün
+    # IsAuthenticated'a çevirmek mevcut her isteği kırardı. Frontend yeniden
+    # yazımı operatörleri giriş yaptırmaya başladığında bu değiştirilecek -
+    # o ana kadar request.user Operator-ya-da-None, anonim istekler için
+    # audit kayıtları "system" olarak düşüyor.
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.TokenAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
     "UNAUTHENTICATED_USER": None,
-    # Disabled: DRF's own ?format= query param (used to pick JSON vs the
-    # browsable API) collides with this project's *own* ?format=csv param
-    # on /api/reports/pdks (core/views.py PdksReportView) - with this on,
-    # DRF's content negotiation sees "csv", finds no renderer registered
-    # for it, and 404s before the view ever runs. Nothing else in this
-    # project relies on the ?format= override, so turning it off is safe.
+    # Kapatıldı: DRF'in kendi ?format= query param'ı (JSON mu browsable API
+    # mi seçmek için) bu projenin KENDİ ?format=csv param'ıyla /api/reports/pdks
+    # üzerinde çakışıyor (core/views.py PdksReportView) - bu açıkken DRF'in
+    # content negotiation'ı "csv"yi görüp ona kayıtlı bir renderer bulamıyor
+    # ve view hiç çalışmadan 404 dönüyor. Bu projede başka hiçbir yer ?format=
+    # override'ına ihtiyaç duymuyor, o yüzden kapatmak güvenli.
     "URL_FORMAT_OVERRIDE": None,
 }
 
@@ -76,17 +77,17 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
 ]
 
-# Mirrors server.js's app.use(cors()) - wide open. The API itself still has
-# no cookie/session auth for CORS to weaken; sessions now exist only to
-# support the Django admin login form.
+# server.js'deki app.use(cors())'un aynısı - tamamen açık. API'nin kendisinde
+# CORS'un zayıflatabileceği bir cookie/session auth'u zaten yok; session'lar
+# şu an sadece Django admin login formunu desteklemek için var.
 CORS_ALLOW_ALL_ORIGINS = True
 
 ROOT_URLCONF = "config.urls"
 WSGI_APPLICATION = "config.wsgi.application"
 
-# Only needed for django.contrib.admin's own templates - this project has
-# no other server-rendered pages. APP_DIRS picks up each app's
-# templates/ automatically if any app ever needs its own.
+# Sadece django.contrib.admin'in kendi template'leri için gerekli - bu
+# projede başka server-render edilen sayfa yok. APP_DIRS, ileride bir app'in
+# kendi templates/'ine ihtiyacı olursa onu otomatik olarak buluyor.
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
@@ -114,10 +115,10 @@ DATABASES = {
     }
 }
 
-# Now live: this governs Operator passwords (admin login, createsuperuser,
-# password resets) now that django.contrib.auth is installed. The API's
-# own resources (cards/devices/employees) still have no user-facing auth -
-# see the REST_FRAMEWORK comment above.
+# Artık aktif: django.contrib.auth kurulu olduğu için bu, Operator
+# şifrelerini yönetiyor (admin login, createsuperuser, şifre sıfırlama).
+# API'nin kendi kaynakları (cards/devices/employees) hâlâ kullanıcıya
+# yönelik bir auth'a sahip değil - yukarıdaki REST_FRAMEWORK yorumuna bakın.
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
@@ -126,8 +127,8 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 LANGUAGE_CODE = "en-us"
-# Stored timestamps are UTC (spec 5.3); reports convert explicitly via
-# REPORT_TZ instead of relying on Django/Postgres session timezone.
+# Kaydedilen zaman damgaları UTC (spec 5.3); raporlar Django/Postgres
+# session timezone'una güvenmek yerine REPORT_TZ ile açıkça çeviriyor.
 TIME_ZONE = "UTC"
 USE_TZ = False
 

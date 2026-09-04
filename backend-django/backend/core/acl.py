@@ -1,6 +1,6 @@
 """
-Binary ACL publisher - direct port of publishAclUpdate() in the original
-server.js.
+Binary ACL yayınlayıcısı - orijinal server.js'deki publishAclUpdate()'in
+birebir portu.
 
 Wire Format:
   Header (8 bytes):
@@ -22,7 +22,7 @@ from django.db import connection
 from core import mqtt_utils
 
 def parse_floors(raw):
-    """Mirrors server.js parseFloors(): normalize '1,3' / [1,3] into ints."""
+    """server.js'deki parseFloors()'un aynısı: '1,3' / [1,3] gibi girdileri int listesine normalize eder."""
     if raw is None:
         return []
     if isinstance(raw, (list, tuple)):
@@ -71,7 +71,7 @@ def build_acl_buffer(cards, version):
         uid_len = min(len(uid_bytes), 7)
 
         buf[offset:offset + uid_len] = uid_bytes[:uid_len]
-        # remaining bytes up to 7 are already zero from bytearray init
+        # 7'ye kadar kalan byte'lar zaten bytearray init'inden sıfır
         offset += 7
 
         struct.pack_into("<B", buf, offset, uid_len)
@@ -94,9 +94,12 @@ def build_acl_buffer(cards, version):
         utc_start_m = local_start_m
         utc_end_m = local_end_m
 
-        # Only convert if not full-day access (0 to 1440), same as server.js.
+        # Sadece tam gün erişim (0-1440) değilse çevir - server.js ile aynı.
+        # Firmware her zaman UTC dakika bekliyor (bkz. acl_engine.cpp
+        # evaluateAccess), pencereler burada local (Türkiye) saatle
+        # girildiği için ikisi arasında fark var.
         if not (local_start_m == 0 and local_end_m == 1440):
-            tz_offset_minutes = settings.TZ_OFFSET_MINUTES  # Turkey = +180 mins
+            tz_offset_minutes = settings.TZ_OFFSET_MINUTES  # Türkiye = +180 dk
 
             utc_start_m = (local_start_m - tz_offset_minutes) % 1440
             if utc_start_m < 0:
@@ -115,8 +118,9 @@ def build_acl_buffer(cards, version):
 
 
 def publish_acl_update():
-    """Rebuilds the binary ACL from active cards and publishes it retained
-    to pdks/merkez/cfg/acl, exactly like server.js's publishAclUpdate()."""
+    """Aktif kartlardan binary ACL'i yeniden kurar ve server.js'deki
+    publishAclUpdate() ile birebir aynı şekilde pdks/merkez/cfg/acl'e
+    retained olarak yayınlar."""
     from cards.models import Card
     cards = list(
         Card.objects.filter(is_active=True).values_list(

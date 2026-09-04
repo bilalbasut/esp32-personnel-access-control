@@ -18,7 +18,7 @@ router.register(r"events", EventViewSet, basename="event")
 router.register(r"firmware", FirmwareViewSet, basename="firmware")
 
 urlpatterns = [
-    # All RESTful resources & custom actions:
+    # Tüm RESTful kaynaklar & custom action'lar:
     # - /api/devices (list/create)
     # - /api/devices/<id> (retrieve/update/delete)
     # - /api/devices/<id>/command (@action)
@@ -34,20 +34,21 @@ urlpatterns = [
     # - /api/firmware/upload (@action)
     path("api/", include(router.urls)),
 
-    # Analytical / Reporting endpoint
+    # Analitik / Raporlama endpoint'i
     path("api/reports/pdks", PdksReportView.as_view(), name="reports-pdks"),
 
-    # Operator auth: POST {username, password} -> {"token": "..."} (DRF's
-    # built-in view - no custom login code needed). Send the token back as
-    # `Authorization: Token <token>` on subsequent requests.
+    # Operatör auth: POST {username, password} -> {"token": "..."} (DRF'in
+    # hazır view'ı - custom login kodu gerekmiyor). Sonraki isteklerde
+    # token'ı `Authorization: Token <token>` olarak geri gönder.
     path("api/auth/login", obtain_auth_token, name="auth-login"),
     path("api/auth/me", MeView.as_view(), name="auth-me"),
 
-    # Django admin - a working management UI for operators/cards/employees/
-    # devices/firmware today, independent of the Vue frontend rewrite.
+    # Django admin - Vue frontend'inden bağımsız, operatörler/kartlar/
+    # employee'ler/cihazlar/firmware için bugün itibarıyla çalışan bir
+    # yönetim arayüzü.
     path("admin/", admin.site.urls),
 
-    # Direct static binary serving for ESP32 HTTP OTA download
+    # ESP32'nin HTTP OTA indirmesi için doğrudan static binary servisi
     path(
         "firmware/<path:path>",
         static_serve,
