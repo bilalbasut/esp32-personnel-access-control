@@ -1,28 +1,6 @@
-"""Backend test suite - collector's raw-SQL insert paths (collector.py).
-
-The collector is a standalone script (not part of the Django app), talking
-to Postgres via raw psycopg2 and to Mosquitto via paho-mqtt - there's no
-Django test runner, no APITestCase, and no broker/DB available in a plain
-`python -m unittest` run. So instead of a real DB, every handler is tested
-against a fake connection/cursor that just records the SQL text and params
-it was called with, and asserts on those.
-
-This is deliberately the regression test for the bug we just fixed: every
-one of the four upsert queries below (device fw/presence, /status, /hb,
-OTA cmd/res) must set created_at/updated_at explicitly, because these
-INSERTs bypass Django's ORM entirely - auto_now_add/auto_now never run.
-Devices now inherits core/models.py BaseModel, whose created_at/updated_at
-DO carry a Postgres-level db_default (see BaseModel docstring) - that
-covers the plain INSERT case (a first-ever row for a device), but a
-db_default is NOT consulted by `ON CONFLICT ... DO UPDATE SET ...`: if
-updated_at isn't named in that SET clause, an existing row's updated_at
-simply stays at its old value instead of refreshing. So this test's
-concern is still real for the update path, even though the insert path
-now has a safety net it didn't have before.
-
-Run directly (needs the collector's own venv/deps - paho-mqtt, psycopg2):
-    cd collector && python -m unittest test_collector.py -v
-"""
+"""Tests collector.py's raw-SQL handlers against a fake cursor (no Django test runner, no real DB/broker here).
+Regression coverage: db_default covers plain INSERT but not ON CONFLICT DO UPDATE, so updated_at must be set explicitly.
+Run: cd collector && python -m unittest test_collector.py -v"""
 import json
 import os
 import sys
@@ -33,12 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import db  # noqa: E402  - local module (collector/db.py)
 
-# collector.py opens a real DB connection at import time
-# (`conn = db.connect()` / `db.wait_for_schema(conn)` at module scope), so
-# db.connect/wait_for_schema must be patched *before* collector is
-# imported anywhere in the process - there's no DB running under this
-# test. Patched only around the import itself; every test below swaps in
-# its own FakeConnection via `collector.conn` (see FakeDbTestCase).
+# collector.py connects to a real DB at import time, so patch before importing it.
 with patch.object(db, "connect", return_value=MagicMock()), \
      patch.object(db, "wait_for_schema", return_value=None):
     import collector  # noqa: E402
@@ -84,9 +57,7 @@ class FakeConnection:
 
 
 class FakeDbTestCase(unittest.TestCase):
-    """Base class that swaps collector's module-level `conn` global for a
-    fake one for the duration of each test. Handler functions look up
-    `conn` by name at call time, so this is enough - no re-import needed."""
+    """Swaps collector's module-level `conn` for a fake one per test."""
 
     def setUp(self):
         self.cursor = FakeCursor()
@@ -99,9 +70,7 @@ class FakeDbTestCase(unittest.TestCase):
 class HandleEventTests(FakeDbTestCase):
     def setUp(self):
         super().setUp()
-        # handle_event's employee lookup (`SELECT employee_id FROM cards ...`)
-        # calls cur.fetchone() - give it something to find.
-        self.cursor._fetchone_result = (42,)
+        self.cursor._fetchone_result = (42,)  # employee lookup result
         self.client = MagicMock()
 
     def _payload(self, **overrides):
@@ -113,9 +82,6 @@ class HandleEventTests(FakeDbTestCase):
         return json.dumps(data)
 
     def test_device_upsert_sets_created_and_updated_at(self):
-        """Regression test for the NOT NULL violation: the fw/presence
-        upsert must explicitly set created_at/updated_at via NOW(), since
-        this INSERT never goes through Django's auto_now_add/auto_now."""
         collector.handle_event(self.client, "GATE-K3-001", self._payload())
 
         device_upsert_query = self.cursor.executed[0][0]
@@ -239,9 +205,7 @@ class HandleCmdResTests(FakeDbTestCase):
 
 
 class TranslationMapTests(unittest.TestCase):
-    """The maps are the single source of truth for string<->SMALLINT
-    translation between firmware payloads and Postgres - a typo here would
-    silently misclassify every event of that kind."""
+    """A typo here would silently misclassify every event of that kind."""
 
     def test_map_result(self):
         self.assertEqual(collector.MAP_RESULT, {

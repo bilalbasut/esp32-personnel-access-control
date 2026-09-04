@@ -38,10 +38,7 @@ void RFIDReader::update() {
     rfid.PCD_StopCrypto1();
 
     unsigned long nowMillis = millis();
-    // Debounce sadece AYNI kart için geçerli - okuyucunun üstünde bekletilen
-    // bir kart tekrar tekrar event üretmesin diye. Farklı bir kart hemen
-    // arkasından okutulursa (örn. iki kişi art arda giriyor) debounce'a
-    // takılmadan anında işlenir.
+    // Debounce sadece aynı kart için - farklı bir kart hemen arkasından anında işlenir.
     bool sameCard = (uidLen == lastUidLen) && (memcmp(uidBytes, lastUid, uidLen) == 0);
     if (sameCard && nowMillis - lastScanTime < RFID_DEBOUNCE_MS) return;
 

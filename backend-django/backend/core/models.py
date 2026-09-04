@@ -5,18 +5,16 @@ from django.utils import timezone
 
 
 class ActiveManager(models.Manager):
-    """BaseModel'in default manager'ı: soft-delete edilmiş satırları her
-    normal queryset'ten (list/detail view'lar, FK gezinmesi, admin liste
-    sayfaları) hiç kimsenin ayrıca filtrelemeyi hatırlamasına gerek kalmadan
-    gizler."""
+    """Default manager - soft-delete edilmiş satırları her queryset'ten gizler."""
     def get_queryset(self):
         return super().get_queryset().filter(deleted_at__isnull=True)
 
 
 class BaseModel(models.Model):
-    """Projedeki tüm modeller için tek, ortak taban. Her satır
-    artık created_at/updated_at/deleted_at/is_active taşıyor.
-    """
+    """Tüm modellerin ortak tabanı. db_default (Postgres DEFAULT now()) kullanır,
+    auto_now_add değil - collector.py/seed script ORM'i bypass edip ham SQL INSERT
+    atıyor, auto_now_add o yolda sessizce NULL bırakırdı. `all_objects` soft-delete
+    filtresiz kaçış kapısı; gerçek DELETE için `hard_delete()`."""
     created_at = models.DateTimeField(db_default=Now())
     updated_at = models.DateTimeField(db_default=Now())
     deleted_at = models.DateTimeField(null=True, blank=True)
@@ -42,12 +40,7 @@ class BaseModel(models.Model):
         abstract = True
 
     def save(self, *args, **kwargs):
-        # auto_now=True'nun elle yapılan hali - db_default ile bir arada
-        # kullanılamadığı için (bkz. sınıf docstring'i). Django'nun kendi
-        # auto_now'ıyla aynı sınırlamayı bilerek koruyor: update_fields
-        # verilip updated_at listede değilse, bu satır DB'ye YAZILMAZ - bu
-        # bir bug değil, çağıranın "sadece şu alanları değiştir" niyetine
-        # saygı; delete()'in kendisi zaten hiç update_fields vermiyor.
+        # auto_now=True'nun elle hali (db_default ile birlikte kullanılamıyor) - update_fields'a updated_at'i zorla ekler.
         self.updated_at = timezone.now()
         update_fields = kwargs.get("update_fields")
         if update_fields is not None:
@@ -62,8 +55,7 @@ class BaseModel(models.Model):
         super().delete(*args, **kwargs)
 
     def soft_delete(self):
-        """delete() için açık bir alias - davranış aynı, sadece çağıran yer
-        ".delete()" yerine "soft delete" demek istediğinde kullanılıyor."""
+        """delete()'in okunabilir alias'ı."""
         self.delete()
 
     def restore(self):
@@ -80,18 +72,16 @@ class Firmware(BaseModel):
     filename = models.CharField(max_length=255)
     md5 = models.CharField(max_length=32)
     size = models.IntegerField()
-    # TimestampedModel'in auto_now_add'ı yerine bilinçli olarak elle set
-    # edilen bir upload zaman damgası (unix epoch, FirmwareViewSet.
-    # upload_binary tarafından set ediliyor) - tek bir yetkili "ne zaman"
-    # alanı, birbiriyle çelişebilecek iki zaman damgasını önlüyor.
-    uploaded_at = models.BigIntegerField(null=True, blank=True)
+    uploaded_at = models.BigIntegerField(null=True, blank=True)  # elle set edilir (FirmwareViewSet.upload_binary), auto değil
 
     class Meta:
         db_table = "firmware"
 
 
 class AccessEvent(BaseModel):
-    
+    """MQTT collector'ın yazdığı ham kapı-geçiş log'u. Device/Employee/Card'a gerçek FK
+    yok, kayıt henüz senkron olmayan bir cihazdan reddedilmesin diye - ilişkilendirme
+    okuma anında LEFT JOIN ile yapılır (EventViewSet, PdksReportView)."""
     device_id = models.CharField(max_length=50, null=True, blank=True, db_index=True)
     seq = models.IntegerField(null=True, blank=True)
     uid = models.CharField(max_length=50, null=True, blank=True)
@@ -101,15 +91,8 @@ class AccessEvent(BaseModel):
     dir = models.SmallIntegerField(null=True, blank=True)
     result = models.SmallIntegerField(null=True, blank=True)
     mode = models.SmallIntegerField(null=True, blank=True)
-    # collector'ın bu satırı gerçekten yazdığı an (unix epoch) - event'in
-    # kendi donanım-raporlu zamanı olan ts_utc'den farklı.
-    ingested_at = models.BigIntegerField(null=True, blank=True)
-    # Güvenlik ağı: bu satırın parse edildiği ham MQTT JSON payload'ı.
-    # Kolon-eşleme hataları ya da henüz bağlanmamış yeni bir firmware alanı
-    # olmasaydı bu veriyi kalıcı olarak kaybederdi - bu sayede ileride
-    # replay/backfill yapılabiliyor. Nullable, çünkü mevcut satırlar (ve ham
-    # payload'ı elinde olmayan hiçbir insert yolu) bundan etkilenmesin.
-    raw_payload = models.JSONField(null=True, blank=True)
+    ingested_at = models.BigIntegerField(null=True, blank=True)  # collector'ın yazdığı an, ts_utc'den farklı
+    raw_payload = models.JSONField(null=True, blank=True)  # ham MQTT payload'ı, replay/backfill için
 
     class Meta:
         db_table = "access_events"

@@ -1,17 +1,4 @@
-"""Backend test suite - PDKS report endpoint (core/views.py PdksReportView).
-
-This view is 100% raw SQL (a CTE chain run straight through
-connection.cursor()), so nothing here is caught by Django's ORM-level
-guarantees - a typo in a column name or a broken window-function partition
-would only show up by actually running the query. These tests create real
-AccessEvent/Employee rows and assert on the computed aggregates, not just
-status codes.
-
-All test classes authenticate via AuthenticatedAPITestCase (core/test_utils.py) -
-DEFAULT_PERMISSION_CLASSES=[IsAuthenticated] (config/settings.py) now guards
-this endpoint too, so an unauthenticated self.client would just get 401
-before any of the report logic under test ever ran.
-"""
+"""PdksReportView is 100% raw SQL, no ORM guarantees - tests assert on computed aggregates, not just status codes."""
 import os
 from datetime import datetime, timezone as dt_timezone
 from unittest.mock import patch
@@ -29,10 +16,7 @@ from core.models import AccessEvent, Firmware
 from core.test_utils import AuthenticatedAPITestCase
 from devices.models import Device
 
-# Fixed instant chosen so that both the check-in and check-out below land on
-# the same Europe/Istanbul calendar day (default REPORT_TZ, UTC+3) - the
-# report groups by working_date, so a value near a day boundary would make
-# the "same day" assumption in these tests flaky.
+# Lands both events on the same Europe/Istanbul calendar day - report groups by working_date.
 CHECK_IN_TS = int(datetime(2024, 1, 15, 12, 0, 0, tzinfo=dt_timezone.utc).timestamp())
 CHECK_OUT_TS = CHECK_IN_TS + 3600  # 1 hour later
 
@@ -132,13 +116,7 @@ class PdksReportComputationTests(AuthenticatedAPITestCase):
 
 
 class FirmwareUploadTests(AuthenticatedAPITestCase):
-    """FirmwareViewSet.upload_binary (core/views.py) is the one place in the
-    project that writes a real file to disk as a side effect of an API
-    call, and it deliberately distinguishes a brand-new version (sets
-    created_by) from re-uploading an existing one (sets updated_by, leaves
-    created_by alone) via the is_new/existing lookup done BEFORE
-    update_or_create() - see the comment there. These tests exercise both
-    branches and clean up the file(s) they write afterward."""
+    """New version sets created_by; re-upload sets updated_by only. Cleans up written files."""
 
     def _cleanup_firmware_file(self, version):
         path = os.path.join(settings.FIRMWARE_DIR, f"firmware_{version}.bin")
@@ -174,9 +152,7 @@ class FirmwareUploadTests(AuthenticatedAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
 
         firmware.refresh_from_db()
-        # created_by must NOT be clobbered by the second upload - only
-        # updated_by should change, exactly the point of the is_new check.
-        self.assertEqual(firmware.created_by_id, original_created_by_id)
+        self.assertEqual(firmware.created_by_id, original_created_by_id)  # not clobbered by 2nd upload
         self.assertEqual(firmware.updated_by_id, self.operator.id)
         self.assertEqual(firmware.size, len(b"second-cut-longer-content"))
 
@@ -199,10 +175,7 @@ class FirmwareUploadTests(AuthenticatedAPITestCase):
 
 
 class FirmwareDownloadTests(APITestCase):
-    """FirmwareViewSet.download is deliberately AllowAny (the ESP32 itself
-    hits this, and can't hold a JWT - see the permission_classes comment on
-    the action in core/views.py). Deliberately does NOT use
-    AuthenticatedAPITestCase - the whole point is an unauthenticated client."""
+    """download is AllowAny - the ESP32 hits this and can't hold a JWT."""
 
     def setUp(self):
         self.version = "9.9.4-test"
@@ -233,8 +206,7 @@ class FirmwareDownloadTests(APITestCase):
 
 
 class EventUnauthenticatedAccessTests(APITestCase):
-    """Deliberately does NOT use AuthenticatedAPITestCase - unlike firmware
-    download, EventViewSet has no AllowAny carve-out, so this must 401."""
+    """Unlike firmware download, EventViewSet has no AllowAny carve-out."""
 
     def test_list_without_authentication_returns_401(self):
         response = self.client.get("/api/events")
@@ -243,12 +215,7 @@ class EventUnauthenticatedAccessTests(APITestCase):
 
 class EventListTests(AuthenticatedAPITestCase):
     def test_list_returns_events_newest_first_with_employee_joined(self):
-        # EventViewSet's raw SQL (core/views.py) joins
-        # access_events.uid -> cards.uid -> cards.employee_id -> employees.id -
-        # NOT via any FK on AccessEvent itself (there isn't one, by design -
-        # see AccessEvent's docstring). So the employee has to be reachable
-        # through a real Card row with a matching uid, not just an
-        # employee_id column value sitting on the event.
+        # raw SQL joins uid -> cards.uid -> employee_id, not an AccessEvent FK - needs a real Card row.
         employee = Employee.objects.create(full_name="Newest First Test")
         Card.objects.create(uid="EVT2", employee=employee)
 
@@ -260,22 +227,14 @@ class EventListTests(AuthenticatedAPITestCase):
         response = self.client.get("/api/events")
         self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
         seqs = [row["seq"] for row in response.data]
-        # ORDER BY a.id DESC (EventViewSet.get_queryset, core/views.py) -
-        # the later-inserted row (seq=102) must come first.
-        self.assertLess(seqs.index(102), seqs.index(101))
+        self.assertLess(seqs.index(102), seqs.index(101))  # ORDER BY a.id DESC
 
         newest = next(row for row in response.data if row["seq"] == 102)
         self.assertEqual(newest["full_name"], "Newest First Test")
 
 
 class BaseModelSaveBehaviorTests(TestCase):
-    """BaseModel.save() (core/models.py) - the auto_now=True stand-in.
-    Django's own auto_now has a documented gotcha: if you pass
-    update_fields=[...] and don't include the auto_now field's name in that
-    list, it silently does NOT get refreshed. BaseModel.save() deliberately
-    works around exactly that gotcha by always injecting "updated_at" into
-    update_fields itself - this pins that specific behavior down, using
-    Device as the vehicle since it's a simple, familiar BaseModel subclass."""
+    """save() force-injects updated_at into update_fields - auto_now skips it otherwise."""
 
     def test_partial_save_with_update_fields_still_refreshes_updated_at(self):
         device = Device.objects.create(id="SAVE-TEST-01", name="Original")
@@ -291,16 +250,10 @@ class BaseModelSaveBehaviorTests(TestCase):
 
 class AccessEventConstraintTests(TestCase):
     def test_duplicate_device_id_and_seq_raises_integrity_error(self):
-        """uniq_device_seq (AccessEvent.Meta.constraints, core/models.py) -
-        the collector's own duplicate-seq handling (collector/test_collector.py
-        test_duplicate_seq_still_acks_and_rolls_back_without_crashing) relies
-        on this exact constraint existing at the DB level; this confirms the
-        migration that created it is actually in effect via the ORM too."""
+        """uniq_device_seq is what collector's duplicate-seq handling relies on."""
         AccessEvent.objects.create(device_id="GATE-K3-001", seq=1)
         with self.assertRaises(IntegrityError):
             with transaction.atomic():
                 AccessEvent.objects.create(device_id="GATE-K3-001", seq=1)
 
-        # A different device with the same seq is a completely different
-        # story - the constraint is on the (device_id, seq) PAIR.
-        AccessEvent.objects.create(device_id="GATE-K3-002", seq=1)
+        AccessEvent.objects.create(device_id="GATE-K3-002", seq=1)  # constraint is on the (device_id, seq) pair

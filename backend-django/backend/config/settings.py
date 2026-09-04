@@ -17,23 +17,13 @@ ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.staticfiles",
-    # Gerçek operatör kimliği/audit için eklendi (daha önce bu API'de hiç
-    # user modeli yoktu). auth+sessions+messages+admin, admin.site'ın
-    # ihtiyaç duyduğu standart paket - aşağıdaki TEMPLATES'e bakın, admin
-    # onu da gerektiriyor ve bu proje şimdiye kadar hiç kullanmıyordu.
     "django.contrib.auth",
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.admin",
     "corsheaders",
     "rest_framework",
-    # rest_framework.authtoken (tek, süresi dolmayan opak token) JWT'ye
-    # geçişle birlikte KALDIRILDI - bkz. SIMPLE_JWT ve aşağıdaki
-    # DEFAULT_AUTHENTICATION_CLASSES. token_blacklist, logout'ta refresh
-    # token'ı gerçekten geçersiz kılabilmek için gerekli (bkz. accounts/views.py
-    # LogoutView) - kendi migration'larını getiriyor (OutstandingToken/
-    # BlacklistedToken tabloları).
-    "rest_framework_simplejwt.token_blacklist",
+    "rest_framework_simplejwt.token_blacklist",  # logout'ta refresh token'ı geçersiz kılmak için
     "core",
     "devices",
     "cards",
@@ -52,45 +42,21 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.MultiPartParser",
         "rest_framework.parsers.FormParser",
     ],
-    # JWT (access + refresh, bkz. SIMPLE_JWT altta) artık ana auth yöntemi -
-    # eski, süresi hiç dolmayan opak TokenAuthentication kaldırıldı.
-    # SessionAuthentication sadece admin login'i ve DRF'in browsable
-    # API'sindeki "Log in" linki için hâlâ duruyor, Vue frontend'i
-    # ilgilendirmiyor.
+    # SessionAuthentication sadece admin login/browsable API için, Vue frontend JWT kullanır.
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework_simplejwt.authentication.JWTAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
-    # Artık zorunlu: önceden hiçbir endpoint login'in arkasına kilitli
-    # değildi (frontend henüz kimlik bilgisi göndermiyordu, o yüzden bu
-    # bilinçli olarak fiilen AllowAny bırakılmıştı). Login sayfası/JWT ile
-    # birlikte geldi - artık login/refresh/logout dışındaki HER endpoint
-    # kimlik doğrulaması istiyor (o üç view kendi permission_classes'ında
-    # AllowAny ile açıkça override ediyor, bkz. accounts/views.py).
     "DEFAULT_PERMISSION_CLASSES": [
-        "rest_framework.permissions.IsAuthenticated",
+        "rest_framework.permissions.IsAuthenticated",  # login/refresh/logout kendi AllowAny'sini override eder
     ],
     "UNAUTHENTICATED_USER": None,
-    # Kapatıldı: DRF'in kendi ?format= query param'ı (JSON mu browsable API
-    # mi seçmek için) bu projenin KENDİ ?format=csv param'ıyla /api/reports/pdks
-    # üzerinde çakışıyor (core/views.py PdksReportView) - bu açıkken DRF'in
-    # content negotiation'ı "csv"yi görüp ona kayıtlı bir renderer bulamıyor
-    # ve view hiç çalışmadan 404 dönüyor. Bu projede başka hiçbir yer ?format=
-    # override'ına ihtiyaç duymuyor, o yüzden kapatmak güvenli.
+    # Kapalı: DRF'in ?format= param'ı bu projenin ?format=csv ile çakışıp PdksReportView'ı 404'letiyordu.
     "URL_FORMAT_OVERRIDE": None,
 }
 
-# Access token kısa ömürlü (15dk) ve stateless - süresi dolunca sunucu
-# tarafında ayrıca "silinmesine" gerek yok, kendiliğinden geçersiz olur.
-# Refresh token daha uzun ömürlü (7 gün) ama BLACKLIST_AFTER_ROTATION +
-# ROTATE_REFRESH_TOKENS ile her /api/auth/refresh çağrısında eskisi
-# geçersiz kılınıp yenisi veriliyor (bir refresh token'ın çalınıp süresiz
-# tekrar tekrar kullanılabilmesini engelliyor) - logout'ta da aynı
-# blacklist mekanizması kullanılıyor (bkz. accounts/views.py LogoutView):
-# refresh token'ı elle blacklist'e ekleyip "artık kullanılamaz" hale
-# getiriyor. Access token'ın kendisi logout'ta TERSİNE ÇEVRİLEMEZ (stateless,
-# imzası hâlâ geçerli) - bu yüzden ömrü bilerek kısa tutuldu, en kötü
-# ihtimalle logout sonrası 15 dakika daha geçerli kalabilir.
+# Access token stateless, kısa ömürlü (15dk) - logout'ta geri alınamaz, en kötü 15dk geçerli kalır.
+# Refresh token rotate+blacklist ile korunur (bkz. LogoutView).
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
@@ -110,29 +76,11 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
 ]
 
-# server.js'deki app.use(cors())'un aynısı - tamamen açık. API'nin kendisinde
-# CORS'un zayıflatabileceği bir cookie/session auth'u zaten yok; session'lar
-# şu an sadece Django admin login formunu desteklemek için var.
-CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_ALL_ORIGINS = True  # cookie/session auth'u zayıflatacak bir şey yok, session sadece admin login için
 
-# BİLEREK EKLENDİ - Django'nun kendi varsayılan LOGGING'i (bu dosyada hiç
-# LOGGING tanımlanmamış olsaydı devreye giren hali), django.request logger'ını
-# ("bir view 4xx/5xx dönünce" ateşlenir, ama sadece 500+ 'ERROR' seviyesinde -
-# 400/404'ler bu logger'ın kendi level="ERROR" eşiğinin altında kaldığı için
-# hiç görünmez) mail_admins (AdminEmailHandler) handler'ına bağlıyor. Bu proje
-# hiç ADMINS/EMAIL_* tanımlamadığı için o handler zaten pratikte ölü kod
-# yürütüyordu (fail_silently=True ile sessizce hiçbir şey yapmıyordu) - ama
-# AdminEmailHandler.emit() gerçek bir exception olsun olmasın HER ZAMAN bir
-# ExceptionReporter traceback şablonu render etmeye çalışıyor, ve Django'nun
-# template Context.__copy__()'ı Python 3.14'te kırılan bir super() davranışına
-# dayanıyor - sonuç: Python 3.14 altında `manage.py test` (test runner DEBUG'ı
-# False'a zorluyor, mail_admins'in require_debug_false filtresini aktive
-# ediyor) her 500 dönen view'da gerçek bir crash'e dönüşüyor (devices/tests.py
-# DeviceCommandActionTests/DeviceOtaActionTests bunu yakaladı). django.request
-# logger'ını burada mail_admins yerine düz bir console handler'a yönlendirmek
-# hem bu crash'i ortadan kaldırıyor hem zaten hiçbir şey yapmayan bir
-# handler'a bel bağlamayı bırakıyor - production'da gerçek hata takibi
-# istenirse (Sentry vb.) buraya eklenecek yer tam olarak burası.
+# django.request'i mail_admins'ten console'a yönlendirir: Python 3.14'te AdminEmailHandler'ın
+# traceback render'ı her 500'de crash ediyordu (Context.__copy__ super() uyumsuzluğu).
+# Sentry gibi gerçek hata takibi istenirse eklenecek yer burası.
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
@@ -151,9 +99,7 @@ LOGGING = {
 ROOT_URLCONF = "config.urls"
 WSGI_APPLICATION = "config.wsgi.application"
 
-# Sadece django.contrib.admin'in kendi template'leri için gerekli - bu
-# projede başka server-render edilen sayfa yok. APP_DIRS, ileride bir app'in
-# kendi templates/'ine ihtiyacı olursa onu otomatik olarak buluyor.
+# Sadece django.contrib.admin'in template'leri için, başka server-render sayfa yok.
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
@@ -181,10 +127,6 @@ DATABASES = {
     }
 }
 
-# Artık aktif: django.contrib.auth kurulu olduğu için bu, Operator
-# şifrelerini yönetiyor (admin login, createsuperuser, şifre sıfırlama).
-# API'nin kendi kaynakları (cards/devices/employees) hâlâ kullanıcıya
-# yönelik bir auth'a sahip değil - yukarıdaki REST_FRAMEWORK yorumuna bakın.
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
@@ -193,9 +135,7 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 LANGUAGE_CODE = "en-us"
-# Kaydedilen zaman damgaları UTC (spec 5.3); raporlar Django/Postgres
-# session timezone'una güvenmek yerine REPORT_TZ ile açıkça çeviriyor.
-TIME_ZONE = "UTC"
+TIME_ZONE = "UTC"  # raporlar REPORT_TZ ile açıkça çevirir, session timezone'una güvenmez
 USE_TZ = False
 
 STATIC_URL = "static/"

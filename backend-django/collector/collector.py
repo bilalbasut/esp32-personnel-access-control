@@ -48,10 +48,7 @@ def handle_event(client, device_id, payload):
 
     now = now_s()
 
-    # Opportunistic presence/firmware takibi - "fw" sadece event payload'larında
-    # görünür, heartbeat'lerde asla, yani bu değeri yakalayabileceğimiz tek
-    # yer burası. Aşağıdaki insert tekrar (duplicate) çıksa bile bu çalışır,
-    # çünkü bu sadece presence + versiyon, event'in kendisi değil.
+    # "fw" sadece event payload'larında görünür (heartbeat'te değil), burası tek yakalama noktası.
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -93,10 +90,7 @@ def handle_event(client, device_id, payload):
         (device_id, seq, uid, employee_id, ts_utc, ts_source, dir, result, mode, ingested_at, raw_payload)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
     """
-    # Orijinal payload'ı parse edilmiş kolonların yanında da sakla - bir
-    # eşleme hatası ya da henüz bağlanmamış bir firmware alanı verinin
-    # sonsuza dek kaybolması demek olmamalı; bu replay/backfill'i mümkün kılar.
-    values = (
+    values = (  # raw_payload replay/backfill için saklanır, eşleme hatası veri kaybettirmesin diye
         device_id, data.get("seq"), data.get("uid"), employee_id, ts, tsrc_int, dir_int, res_int, mode_int, now,
         json.dumps(data),
     )
@@ -139,8 +133,7 @@ def handle_heartbeat(device_id, payload):
         hb = {}
         print("Invalid heartbeat JSON, storing presence only.", flush=True)
 
-    # Kör bir UPDATE değil upsert - bu cihazın ilk /status mesajından ÖNCE
-    # gelen bir heartbeat, sessizce sıfır satırı etkileyip veriyi kaybetmesin diye.
+    # upsert, kör UPDATE değil - ilk /status'tan önce gelen heartbeat veri kaybettirmesin
     query = """
         INSERT INTO devices (id, status, last_seen_at, queue_depth, heap_free, queue_overflow, uptime_s, created_at, updated_at)
         VALUES (%s, 'online', %s, %s, %s, %s, %s, NOW(), NOW())
@@ -170,11 +163,7 @@ def handle_heartbeat(device_id, payload):
 def handle_cmd_res(device_id, payload):
     print(f"[CMD RESULT] Device {device_id} responded: {payload}", flush=True)
 
-    # OTA yanıtları (ota_downloading / ota_ok_rebooting / ota_failed / ...)
-    # kalıcı olarak saklanıyor ki panel cihaz başına güncelleme ilerlemesini
-    # gösterebilsin - yukarıdaki heartbeat/fw takibiyle aynı desen. Diğer
-    # komut yanıtları (open_ok, rebooting, sync_triggered) geçici acklar,
-    # uzun vadede saklanacak anlamlı bir şey taşımıyorlar.
+    # Sadece OTA yanıtları kalıcı saklanır (panel ilerleme göstersin diye), diğerleri geçici ack.
     if payload.startswith("ota_"):
         now = now_s()
         try:

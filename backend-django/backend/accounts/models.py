@@ -5,51 +5,17 @@ from core.models import BaseModel
 
 
 class OperatorManager(UserManager):
-    """UserManager'ın create_user()/create_superuser()'ı (Django'nun kendi
-    createsuperuser komutu VE accounts/tests.py bunlara ihtiyaç duyuyor) ile
-    BaseModel.ActiveManager'ın soft-delete filtresini TEK manager'da
-    birleştiriyor.
-
-    NEDEN GEREKLİ: is_active'teki gibi BURADA DA iki abstract base
-    (AbstractUser, BaseModel) aynı isimde ("objects") bir manager
-    tanımlıyor - ama is_active'in aksine Django ALAN çakışmasını (clash)
-    açıkça hataya çeviriyor, MANAGER çakışmasını değil: iki abstract base
-    "objects" tanımladığında Django sessizce üst üste yazıyor, kazanan
-    Django'nun bases sırasını işleme DETAYINA bağlı - yani redeclare
-    etmezsek `Operator.objects`'in gerçekten UserManager mi yoksa
-    ActiveManager mi olacağı belirsiz/kırılgan bir varsayım olurdu (ve
-    yanlış çıkarsa create_user() burada hiç yok sayılırdı). is_active'teki
-    aynı prensip: açık, örtük olandan iyidir - concrete sınıf (Operator)
-    hangi manager'ı istediğini kendi açıkça söylüyor.
-    """
+    """UserManager.create_user() + ActiveManager'ın soft-delete filtresi tek manager'da.
+    AbstractUser ve BaseModel ikisi de "objects" tanımlıyor - Django alan çakışmasını
+    hataya çevirir ama manager çakışmasını sessizce üst üste yazar, kazanan belirsiz kalır."""
     def get_queryset(self):
         return super().get_queryset().filter(deleted_at__isnull=True)
 
 
 class Operator(AbstractUser, BaseModel):
-    """Panelin operatör/kullanıcı kimliği - daha önce sistemde giriş yapmış
-    kullanıcı kavramı yoktu. Sıfırdan model yazmak yerine Django'nun
-    AbstractUser'ı üzerine kuruldu (hazır ve test edilmiş şifre hash'leme,
-    admin login formu, is_staff/is_superuser); BaseModel'den created_at/
-    updated_at/deleted_at/created_by/updated_by/deleted_by geliyor, `role`
-    alanından da bu panelin ihtiyaç duyduğu kabaca admin/operator ayrımı.
-
-    is_active AŞAĞIDA BİLEREK YENİDEN TANIMLANDI: hem AbstractUser hem
-    BaseModel kendi is_active alanını tanımlıyor - iki abstract base aynı
-    isimde alan tanımlayınca Django bunu clash sayıp patlıyor, TEK çözüm
-    concrete sınıfın (Operator) o alanı açıkça override etmesi. Bu aslında
-    hoş bir tesadüf: AbstractUser.is_active zaten Django'nun kendi login
-    kontrolünde kullandığı "bu hesap girebilir mi" bayrağı - BaseModel'in
-    "bu satır soft-delete edilmemiş mi" bayrağıyla anlam olarak zaten
-    örtüşüyor, yani iki ayrı is_active tutmak yerine TEK alanı ikisi için de
-    kullanmak bilinçli bir basitleştirme, sadece clash'i susturan bir hack
-    değil: bir operatör deactivate edildiğinde hem "listelerde pasif
-    görünür" hem "artık giriş yapamaz" aynı anda ve otomatik oluyor.
-
-    objects AŞAĞIDA AYNI SEBEPLE YENİDEN TANIMLANDI - bkz. OperatorManager
-    docstring'i (bu, is_active'in alan versiyonu değil, manager versiyonu
-    olan ikinci bir clash).
-    """
+    """Panelin kullanıcı kimliği, AbstractUser + BaseModel. is_active burada bilerek
+    yeniden tanımlı: ikisi de aynı adda alan tanımlar, Django bunu clash sayıp patlar -
+    tesadüfen faydalı da: deactivate = hem pasif görünür hem giriş yapamaz, tek bayrak."""
     ROLE_ADMIN = "admin"
     ROLE_OPERATOR = "operator"
     ROLE_CHOICES = [
@@ -71,30 +37,10 @@ class Operator(AbstractUser, BaseModel):
 
 
 class AuditLog(BaseModel):
-    """Sistemdeki her anlamlı değişiklik (kart/employee/device/firmware) için
-    bir satır - "kim, ne zaman, ne yaptı" sorusuna cevap veriyor. Artık
-    core/audit_viewset.py'deki AuditedModelViewSet sayesinde her CRUD
-    işleminde OTOMATİK yazılıyor (ayrıca `details.changes` altında her
-    değişen alanın eski/yeni değeri) - önceden sadece view'ların elle
-    çağırdığı log_action()'a bağlıydı, artık unutmak mümkün değil; özel
-    @action'lar (device.command, card.onboard/assign/revoke, firmware.upload
-    gibi standart create/update/delete kalıbına uymayanlar) hâlâ elle
-    log_action() çağırıyor.
-
-    `operator` nullable: frontend henüz kimlik bilgisi göndermeden yapılan
-    bir istek, ya da gerçekten sistem tetikli bir aksiyon, hiçbir operatöre
-    atfedilemez - bunlar sessizce düşürülmek ya da sahte bir kullanıcıya
-    bağlanmak yerine "system" olarak gösteriliyor.
-
-    NOT: BaseModel'den gelen created_by, `operator` ile AYNI değeri taşıyor
-    (accounts/audit.py log_action() ikisini de aynı anda, açıkça set ediyor
-    - kendiliğinden olan bir şey değil, AuditLog.objects.create() BaseModel'in
-    hiçbir otomatik actor-atama mekanizmasından geçmiyor). İki ayrı FK'nin
-    aynı şeyi tutması istenmeyen bir tutarsızlık gibi görünebilir, ama
-    `operator` bu modelin asıl, isimlendirilmiş alanı ve tüm mevcut kod
-    (__str__, audit.py, frontend) onu kullanıyor; created_by sadece
-    BaseModel'i istisnasız uygulamanın getirdiği, zararsız bir fazlalık.
-    """
+    """"Kim ne zaman ne yaptı" satırı - AuditedModelViewSet CRUD'da otomatik yazar,
+    CRUD-dışı @action'lar log_action()'ı elle çağırır. `operator` nullable: sistem
+    tetikli aksiyonlar "system" gösterilir. created_by, operator ile aynı değeri taşır
+    (log_action() ikisini de set eder) - BaseModel'i istisnasız uygulamanın fazlalığı."""
     operator = models.ForeignKey(
         Operator, null=True, blank=True, on_delete=models.SET_NULL, related_name="audit_logs"
     )

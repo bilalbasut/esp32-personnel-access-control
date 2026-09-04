@@ -7,17 +7,7 @@ class EmployeeSerializer(serializers.ModelSerializer):
     class Meta:
         model = Employee
         fields = ["id", "full_name", "department", "employee_no", "email", "phone", "is_active"]
-        # employee_no is unique=True (cards/models.py), so ModelSerializer
-        # auto-attaches a UniqueValidator that runs inside is_valid() -
-        # long before EmployeeViewSet.create()/update() ever gets a chance
-        # to run perform_create()/super().update() and catch the resulting
-        # IntegrityError. That auto-validator was winning and returning a
-        # bare 400 (DRF's own "employee with this employee no already
-        # exists" message) instead of the view's deliberate 409, which is
-        # what a caught-by-a-test round of "more tests" turned up. uid on
-        # Card never has this problem because it's the primary key, and
-        # DRF doesn't auto-validate uniqueness on primary keys - it leaves
-        # that to the database, same as we now do here.
+        # DRF auto-UniqueValidator devre dışı: is_valid() içinde 400 dönerdi, view'ın 409'u hiç çalışmazdı.
         extra_kwargs = {"employee_no": {"validators": []}}
 
 
@@ -53,12 +43,7 @@ class CardSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
-        # Employee bağlanmamış yeni bir kart varsayılan olarak erişim
-        # açmamalı. Model tarafında `is_active` default'u True (assign/onboard
-        # bunu bilerek set ettiği için True kalmalı) - o yüzden bu kısıtı
-        # sadece burada uyguluyoruz: çağıran "is_active"ı açıkça göndermediyse
-        # VE employee bağlamadıysa is_active=False'a zorla. Bu, düz
-        # POST /api/cards yolu için eski server.js davranışını koruyor.
+        # Employee bağlanmamış yeni kart varsayılan erişim açmasın (is_active model default'u True kalır).
         if "is_active" not in self.initial_data and validated_data.get("employee") is None:
             validated_data["is_active"] = False
         return super().create(validated_data)

@@ -5,10 +5,7 @@
 // ============================================================
 // 1. CONFIGURATION
 // ============================================================
-// Not: DEVICE_ID, FLOOR_NUMBER, DEVICE_DIR ve aşağıdaki MQTT topic'leri bu
-// build'e sabit (compile-time) - yani her fiziksel kapı okuyucusu kendi
-// DEVICE_ID/DIR değerleriyle ayrı derlenip flaşlanıyor. Aynı ikili (binary)
-// birden fazla cihaza yüklenemez.
+// DEVICE_ID/DIR/topic'ler compile-time sabit - her kapı kendi binary'siyle flaşlanır, aynı binary iki cihaza yüklenemez.
 #define FW_VERSION "2.0.1"
 #define DEVICE_ID "GATE-K3-01"
 #define FLOOR_NUMBER 3

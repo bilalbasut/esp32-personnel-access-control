@@ -24,17 +24,8 @@ from core.serializers import (
 
 
 class EventViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
-    """
-    GET /api/events yerine geçen read-only bir ViewSet.
-    En yeni 50 event'i employee bilgisiyle zenginleştirilmiş halde tutar.
-
-    Bilinçli olarak sadece list (ReadOnlyModelViewSet değil): aşağıdaki
-    get_queryset() bir RawQuerySet döndürüyor, bunun .filter()/.get()
-    desteği yok. Router'ın detail route'ları (GET /api/events/<pk>)
-    get_object() -> pk'ye göre filtrele çağırır, bu da bu queryset üzerinde
-    AttributeError ile patlardı - aşağıdaki FirmwareViewSet'in de
-    ReadOnlyModelViewSet yerine sadece ListModelMixin olmasının sebebi aynı.
-    """
+    """En yeni 50 event, employee bilgisiyle. Sadece ListModelMixin (ReadOnly değil):
+    get_queryset() RawQuerySet döner, .filter()/.get() desteklemez - detail route AttributeError verirdi."""
     serializer_class = AccessEventSerializer
 
     def get_queryset(self):
@@ -82,10 +73,7 @@ class FirmwareViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
         filename = f"firmware_{version}.bin"
         file_path = os.path.join(settings.FIRMWARE_DIR, filename)
 
-        # update_or_create'den ÖNCE mevcut satırın (varsa) diff için önceki
-        # halini alıyoruz - aynı version'a ikinci bir upload aslında bir
-        # update (var olan binary'nin üzerine yazma), created_by'ı ezmemesi
-        # gerekiyor (bkz. aşağıdaki created/updated_by ayrımı).
+        # Aynı version'a ikinci upload = update; created_by ezilmesin diye önce snapshot alınır.
         existing = Firmware.objects.filter(version=version).first()
         before = snapshot(existing) if existing else None
         is_new = existing is None
@@ -118,19 +106,7 @@ class FirmwareViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
 
     @action(detail=True, methods=["get"], url_path="download", permission_classes=[AllowAny])
     def download(self, request, version=None):
-        """
-        Streams the binary file directly to the ESP32 W5500 client.
-        Serves: GET /api/firmware/<version>/download/
-
-        BİLEREK AllowAny: bu isteği atan taraf bir tarayıcı/operatör değil,
-        network_manager.cpp'nin OTAUpdater'ı - ESP32 firmware'i JWT
-        üretemez/gönderemez, düz bir HTTP GET atıyor (bkz. devices/views.py
-        ota() action'ının kurduğu url). Global IsAuthenticated'a (bkz.
-        config/settings.py DEFAULT_PERMISSION_CLASSES) rağmen bu tek action
-        açık kalmalı, yoksa gerçek donanımda her OTA indirmesi 401 ile
-        patlar. Diğer FirmwareViewSet action'ları (list, upload_binary)
-        hâlâ login gerektiriyor - sadece indirme ucu istisna.
-        """
+        """Bilerek AllowAny: isteği atan ESP32'nin OTAUpdater'ı, JWT üretemez - global IsAuthenticated'a rağmen bu tek action açık."""
         firmware = self.get_object()
         file_path = os.path.join(settings.FIRMWARE_DIR, firmware.filename)
 
@@ -140,7 +116,6 @@ class FirmwareViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        # FileResponse Content-Length'i set eder ve binary parçalar halinde stream eder
         response = FileResponse(open(file_path, "rb"), content_type="application/octet-stream")
         response["Content-Length"] = os.path.getsize(file_path)
         return response
@@ -174,11 +149,7 @@ class PdksReportView(APIView):
                 )
 
         sql = """
-        -- Zone, device_id ÖNEKİNE (prefix) göre belirleniyor - K3=ana giriş,
-        -- K2=mola odası, K1=yemekhane. -01/-02 gibi sonek numaraları zone'u
-        -- etkilemez (bkz. `LIKE 'GATE-K3-%%'`, tam eşleşme değil) - aynı
-        -- K-önekindeki tüm cihazlar aynı zone sayılır. Giriş/çıkış yönü de
-        -- buradan gelmiyor; onu ayrı olarak aşağıdaki a.dir kolonu belirler.
+        -- Zone device_id ÖNEKİNDEN belirlenir: K3=ana giriş, K2=mola, K1=yemekhane. Yön a.dir'den gelir.
         WITH tagged_events AS (
             SELECT
                 a.employee_id,

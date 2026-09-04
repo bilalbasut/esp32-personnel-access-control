@@ -14,39 +14,13 @@ from core.audit_viewset import AuditedModelViewSet
 
 
 class EmployeeViewSet(AuditedModelViewSet, viewsets.ModelViewSet):
-    # perform_create/update/destroy artık elle yazılmıyor - AuditedModelViewSet
-    # (core/audit_viewset.py) created_by/updated_by/deleted_by'ı set edip
-    # alan-bazlı diff'i AuditLog'a otomatik yazıyor. instance.delete() hâlâ
-    # soft-delete (bkz. core/models.py BaseModel) - bu employee'yi referans
-    # alan access event'leri ve kart geçmişi, "yok olmuş" bir satıra işaret
-    # etmek yerine hâlâ anlamlı/açıklanabilir kalıyor.
     queryset = Employee.objects.all().order_by("full_name")
     serializer_class = EmployeeSerializer
 
     def create(self, request, *args, **kwargs):
-        """CardViewSet.create()'deki (bu dosyada yukarıda) AYNI kalıp,
-        AYNI sebep - burada eksikti, testler yazılana kadar fark
-        edilmemişti: employee_no unique=True (cards/models.py), ama bu
-        view onu hiç yakalamıyordu, yani tekrarlı bir employee_no ham bir
-        500'e düşerdi. Card zaten uid için bu korumaya sahipti; Employee'nin
-        de aynısına ihtiyacı vardı.
-
-        perform_create() burada, Card'ın AKSİNE, transaction.atomic()
-        İÇİNE ALINDI - çünkü Employee'de geri alınmaması gereken bir yan
-        etki (MQTT publish_acl_update()) yok, yani Card'daki gerekçe burada
-        geçerli değil. Bu sarma kozmetik değil: IntegrityError'ı Python
-        seviyesinde yakalamak, Postgres'in "bu transaction artık bozuk,
-        rollback'e kadar yeni sorgu kabul etmiyorum" durumunu SİLMİYOR -
-        ATOMIC_REQUESTS kapalı olduğu için normal prod isteğinde bu hiç
-        görünmüyordu (autocommit tek başarısız INSERT'i kendi başına
-        toparlıyor), ama TestCase'in her testi saran örtük atomic bloğunun
-        İÇİNDEyken (python manage.py test'in her zaman yaptığı gibi)
-        bozulma test'in geri kalanına sıçrıyordu: 409 yanıtının kendisi
-        doğru dönüyordu ama testin bir SONRAKİ DB sorgusu (ör. satır
-        sayısını doğrulamak) TransactionManagementError ile patlıyordu.
-        atomic() burada bir SAVEPOINT açıp IntegrityError'da sadece o
-        savepoint'e geri sarıyor, dış transaction'a dokunmuyor - onboard()'un
-        (bu dosyada aşağıda) zaten aynı sebeple yaptığı şey."""
+        """IntegrityError -> 409, Card'ın deseniyle aynı. atomic() sarmalı gerekli:
+        yakalasak da IntegrityError transaction'ı bozar, sonraki sorgular patlar (Card'da
+        MQTT yan etkisi olduğu için bu sarma yok, burada güvenli)."""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
@@ -62,11 +36,7 @@ class EmployeeViewSet(AuditedModelViewSet, viewsets.ModelViewSet):
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     def update(self, request, *args, **kwargs):
-        """create()'deki aynı korumanın, aynı transaction.atomic()
-        sarmalıyla birlikte, update (PATCH/PUT) tarafı - bir employee_no'yu
-        ZATEN kayıtlı başka bir employee_no'ya değiştirmek de aynı şekilde
-        ham bir IntegrityError/500 üretirdi (ve sarmalanmadan bırakılsaydı,
-        aynı şekilde sonraki sorguları bozardı)."""
+        """create()'deki aynı 409 koruması, update tarafı."""
         try:
             with transaction.atomic():
                 return super().update(request, *args, **kwargs)
@@ -84,15 +54,8 @@ class CardViewSet(AuditedModelViewSet, viewsets.ModelViewSet):
     lookup_field = "uid"
 
     def create(self, request, *args, **kwargs):
-        """ModelViewSet.create()'i sadece tekrarlı UID'den gelen
-        IntegrityError'ı ham bir 500 yerine temiz bir 409'a çevirmek için
-        override ediyor. Bilinçli olarak transaction.atomic() İÇİNE
-        ALINMADI: perform_create() ayrıca MQTT publish_acl_update() yan
-        etkisini de tetikliyor; burada bir atomic blok, o ilgisiz MQTT
-        çağrısı başarısız olursa zaten eklenmiş Card satırını geri alırdı.
-        Tek bir Card.objects.create() zaten tek bir statement, yani
-        autocommit tek başına IntegrityError'ı bu transaction'a dokunmadan
-        yakalamaya yetiyor."""
+        """Tekrarlı UID -> 409. Bilerek atomic() içine alınmadı: perform_create()
+        MQTT publish_acl_update() de tetikliyor, atomic olsaydı MQTT hatası zaten eklenmiş Card'ı geri alırdı."""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
@@ -107,9 +70,6 @@ class CardViewSet(AuditedModelViewSet, viewsets.ModelViewSet):
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     def perform_create(self, serializer):
-        # created_by set etmek + audit log yazmak için AuditedModelViewSet'e
-        # (core/audit_viewset.py) devrediyor, ardından ACL yayınını (bu
-        # mixin'in bilmediği, karta özgü bir yan etki) elle tetikliyor.
         super().perform_create(serializer)
         if serializer.instance.is_active:
             publish_acl_update()
@@ -119,12 +79,7 @@ class CardViewSet(AuditedModelViewSet, viewsets.ModelViewSet):
         publish_acl_update()
 
     def perform_destroy(self, instance):
-        # AuditedModelViewSet.perform_destroy() instance.delete()'i çağırıyor
-        # - bu da soft-delete yapıp ayrıca is_active=False'a çekiyor (bkz.
-        # cards/models.py Card.delete()) - kartın uid'sini hâlâ referans alan
-        # her şey için (access event, audit log) geçmişi koruyor, aynı anda
-        # kartı ACL buffer'ından hemen düşürüyor.
-        super().perform_destroy(instance)
+        super().perform_destroy(instance)  # soft-delete + is_active=False (Card.delete())
         publish_acl_update()
 
     @action(detail=False, methods=["post"], url_path="add")
@@ -154,9 +109,7 @@ class CardViewSet(AuditedModelViewSet, viewsets.ModelViewSet):
                     win_end_m=data.get("win_end_m", 1440),
                     is_active=True
                 )
-        except IntegrityError:
-            # Yukarıdaki ön-kontrol, aynı UID eşzamanlı onboard edilirse
-            # race'e açık; asıl güvence DB'nin primary-key constraint'i.
+        except IntegrityError:  # ön-kontrol race'e açık, asıl güvence PK constraint
             return Response({"error": f"Card UID {uid} is already registered."}, status=status.HTTP_409_CONFLICT)
 
         log_action(

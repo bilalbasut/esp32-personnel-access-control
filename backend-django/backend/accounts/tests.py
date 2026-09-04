@@ -1,14 +1,5 @@
-"""Backend test suite - JWT auth round trip (accounts/views.py, config/urls.py,
-config/settings.py SIMPLE_JWT).
-
-Covers the piece the manager specifically asked for: access+refresh tokens,
-and logout actually discarding the refresh token (via simplejwt's
-token_blacklist app) rather than just telling the frontend to forget it.
-Deliberately does NOT use AuthenticatedAPITestCase (core/test_utils.py) -
-that shortcuts real authentication via force_authenticate(), which is
-exactly what these tests need to NOT do; here the token itself has to be
-minted, sent, and (in the logout tests) actually rejected afterwards.
-"""
+"""JWT auth round trip. Deliberately not AuthenticatedAPITestCase - force_authenticate() would
+skip the real token minting/sending/rejection these tests need to exercise."""
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -58,9 +49,7 @@ class JWTAuthFlowTests(APITestCase):
         response = self.client.post("/api/auth/refresh", {"refresh": refresh}, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
         self.assertIn("access", response.data)
-        # ROTATE_REFRESH_TOKENS=True (config/settings.py SIMPLE_JWT) - a fresh
-        # refresh token comes back too, and it must differ from the one spent.
-        self.assertIn("refresh", response.data)
+        self.assertIn("refresh", response.data)  # ROTATE_REFRESH_TOKENS: fresh one differs from spent
         self.assertNotEqual(response.data["refresh"], refresh)
 
     def test_rotated_refresh_token_replaces_the_original(self):
@@ -69,15 +58,13 @@ class JWTAuthFlowTests(APITestCase):
             "/api/auth/refresh", {"refresh": first_refresh}, format="json"
         ).data["refresh"]
 
-        # BLACKLIST_AFTER_ROTATION=True - the original refresh token is spent
-        # the moment it's rotated, not just "superseded".
+        # BLACKLIST_AFTER_ROTATION: original is spent the moment it's rotated.
         reuse_response = self.client.post(
             "/api/auth/refresh", {"refresh": first_refresh}, format="json"
         )
         self.assertEqual(reuse_response.status_code, status.HTTP_401_UNAUTHORIZED)
 
-        # ...while the new one it handed back still works.
-        retry_response = self.client.post(
+        retry_response = self.client.post(  # new one it handed back still works
             "/api/auth/refresh", {"refresh": second_refresh}, format="json"
         )
         self.assertEqual(retry_response.status_code, status.HTTP_200_OK)
@@ -88,8 +75,7 @@ class JWTAuthFlowTests(APITestCase):
         logout_response = self.client.post("/api/auth/logout", {"refresh": refresh}, format="json")
         self.assertEqual(logout_response.status_code, status.HTTP_200_OK)
 
-        # The blacklisted refresh token must no longer mint new access tokens.
-        response = self.client.post("/api/auth/refresh", {"refresh": refresh}, format="json")
+        response = self.client.post("/api/auth/refresh", {"refresh": refresh}, format="json")  # must no longer mint tokens
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_logout_without_refresh_token_returns_400(self):
@@ -97,34 +83,19 @@ class JWTAuthFlowTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_logout_with_already_invalid_refresh_token_still_succeeds(self):
-        # LogoutView deliberately swallows TokenError (accounts/views.py) -
-        # logout's goal ("this token can't be used again") is already true
-        # for a token that's bogus/expired/already blacklisted, so this is a
-        # success, not a 400.
+        # LogoutView swallows TokenError - already-invalid token means the goal is already met.
         response = self.client.post("/api/auth/logout", {"refresh": "not-a-real-token"}, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_logout_with_no_authorization_header_succeeds(self):
-        # LogoutView.permission_classes = [AllowAny] (accounts/views.py) -
-        # reachable with no access token attached at all, which is exactly
-        # how the Vue frontend calls it now (src/api.js api.logout(), a raw
-        # fetch() with no Authorization header - see the comment there for why).
+        # AllowAny - reachable with no access token, same as api.js's bare fetch() logout call.
         refresh = self._login().data["refresh"]
         response = self.client.post("/api/auth/logout", {"refresh": refresh}, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_logout_with_an_invalid_access_token_header_returns_401_not_the_view(self):
-        """Regression test for a real bug this suite caught: LogoutView being
-        AllowAny does NOT make it reachable with a garbage/expired access
-        token in the Authorization header. DRF authenticates BEFORE checking
-        permissions (Request._authenticate() -> perform_authentication(),
-        called from APIView.initial() ahead of check_permissions()) - if
-        JWTAuthentication.authenticate() raises on a bad token, that 401
-        short-circuits the request and LogoutView.post() (and its AllowAny)
-        is never reached at all, so the refresh token would NOT get
-        blacklisted. This is exactly why api.js's logout() deliberately
-        sends a bare fetch() with no Authorization header instead of going
-        through the normal authedFetch() helper - see the comment there."""
+        """DRF authenticates BEFORE checking permissions - a bad access token 401s
+        before AllowAny/LogoutView.post() is ever reached, refresh token never blacklisted."""
         refresh = self._login().data["refresh"]
         response = self.client.post(
             "/api/auth/logout", {"refresh": refresh}, format="json",
@@ -132,6 +103,5 @@ class JWTAuthFlowTests(APITestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
-        # Confirms the refresh token was untouched by the failed attempt above.
-        retry = self.client.post("/api/auth/logout", {"refresh": refresh}, format="json")
+        retry = self.client.post("/api/auth/logout", {"refresh": refresh}, format="json")  # untouched by failed attempt
         self.assertEqual(retry.status_code, status.HTTP_200_OK)

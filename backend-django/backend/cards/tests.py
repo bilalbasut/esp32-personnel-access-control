@@ -1,24 +1,5 @@
-"""Backend test suite - card onboarding/assign/revoke, and (CardAttributionTests)
-created_by/updated_by/deleted_by + AuditLog attribution through CardViewSet.
-
-These exercise CardViewSet's custom actions (cards/views.py) end-to-end
-through the real URL routing, since that's where the riskiest logic lives:
-atomic employee+card creation, the duplicate-UID 409 paths (both the
-pre-check and the IntegrityError fallback), soft-delete via ActiveManager,
-and the "no employee -> inactive by default" rule in CardSerializer.create().
-
-publish_acl_update() is mocked everywhere: it does a real network publish
-via paho-mqtt (core/mqtt_utils.py), and there's no broker running under
-`manage.py test`. What we care about here is that the view *calls* it after
-a successful mutation, not the MQTT wire format (core/acl.py's
-build_acl_buffer() would be the place for that, if/when it gets its own
-test).
-
-All test classes authenticate via AuthenticatedAPITestCase (core/test_utils.py) -
-DEFAULT_PERMISSION_CLASSES=[IsAuthenticated] (config/settings.py) now guards
-every one of these endpoints, so an unauthenticated self.client would just
-get 401 before any of the actual logic under test ever ran.
-"""
+"""Card onboarding/assign/revoke, plus created_by/updated_by/deleted_by attribution.
+publish_acl_update() is mocked everywhere - no broker under manage.py test."""
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -66,9 +47,7 @@ class CardOnboardTests(AuthenticatedAPITestCase):
         }, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
-        # The pre-check must short-circuit before the employee is created -
-        # otherwise a rejected onboard would still leave an orphan Employee row.
-        self.assertEqual(Employee.objects.count(), employees_before)
+        self.assertEqual(Employee.objects.count(), employees_before)  # pre-check must run before employee is created
         self.mock_publish.assert_not_called()
 
     def test_onboard_missing_required_field_returns_400(self):
@@ -215,10 +194,7 @@ class EmployeeSoftDeleteTests(AuthenticatedAPITestCase):
 
 
 class EmployeeAttributionTests(AuthenticatedAPITestCase):
-    """EmployeeViewSet has no custom perform_*() at all (cards/views.py) -
-    it gets 100% of its attribution/audit behaviour from AuditedModelViewSet.
-    Covering it separately from Card confirms the mixin works stand-alone,
-    not just when a subclass calls super()."""
+    """No custom perform_*() here - confirms AuditedModelViewSet works stand-alone."""
 
     def test_create_sets_created_by_and_writes_audit_log(self):
         response = self.client.post(
@@ -254,11 +230,7 @@ class EmployeeAttributionTests(AuthenticatedAPITestCase):
 
 
 class CardAttributionTests(AuthenticatedAPITestCase):
-    """CardViewSet overrides perform_create/update/destroy to also publish
-    ACL updates (cards/views.py), each calling super().perform_x() first -
-    these confirm that wrapping didn't lose the AuditedModelViewSet
-    attribution/audit-log behaviour underneath, i.e. Card mutations still
-    "hold operator info" exactly like the unwrapped Device/Employee ones."""
+    """Confirms the ACL-publish override still calls super() and keeps attribution."""
 
     def setUp(self):
         super().setUp()
@@ -298,10 +270,7 @@ class CardAttributionTests(AuthenticatedAPITestCase):
 
 
 class CardValidationTests(AuthenticatedAPITestCase):
-    """CardSerializer.validate() (cards/serializers.py) - floors must be
-    integers in 0-31 (a physical floor-relay bit mask, see core/acl.py
-    build_acl_buffer()), and win_start_m/win_end_m must be a proper
-    ascending pair inside a single day (0-1440 minutes)."""
+    """floors: ints 0-31 (relay bit mask). win_start_m/win_end_m: ascending pair, 0-1440."""
 
     def setUp(self):
         super().setUp()
@@ -342,11 +311,7 @@ class CardValidationTests(AuthenticatedAPITestCase):
         self.assertEqual(card.win_end_m, 1020)
 
     def test_uid_is_stripped_and_uppercased(self):
-        # CardSerializer.validate_uid() (cards/serializers.py) - the plain
-        # POST /api/cards path normalizes uid itself; onboard()/revoke() do
-        # their own separate .strip().upper() (cards/views.py) since they
-        # use different serializers entirely. This is that third, otherwise
-        # untested normalization point.
+        # plain POST /api/cards normalizes uid separately from onboard()/revoke()'s own strip/upper.
         response = self.client.post("/api/cards", {"uid": "  ab:cd:ef  "}, format="json")
         self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
         self.assertTrue(Card.objects.filter(uid="AB:CD:EF").exists())
@@ -354,23 +319,7 @@ class CardValidationTests(AuthenticatedAPITestCase):
 
 
 class EmployeeUniqueConstraintTests(AuthenticatedAPITestCase):
-    """Employee.employee_no is unique=True (cards/models.py) but, unlike
-    Card's uid, EmployeeViewSet originally had no IntegrityError handling
-    at all - a duplicate employee_no fell straight through to an unhandled
-    500. First fix: cards/views.py EmployeeViewSet.create()/update() got
-    the same try/except IntegrityError -> 409 pattern CardViewSet.create()
-    already used for uid.
-
-    That wasn't enough on its own, and running this exact test caught it:
-    unlike uid (Card's primary key, which DRF does not auto-validate for
-    uniqueness), employee_no is a plain unique=True field, so
-    ModelSerializer auto-attaches a UniqueValidator that runs inside
-    serializer.is_valid() - before create()/update() ever reaches the
-    try/except, short-circuiting straight to a bare 400. Second fix:
-    EmployeeSerializer (cards/serializers.py) now disables that
-    auto-validator for employee_no via extra_kwargs, so validation passes
-    through to the database and the view's IntegrityError -> 409 handling
-    actually runs."""
+    """Duplicate employee_no must 409, not 500 or a bare 400 from DRF's auto UniqueValidator."""
 
     def test_duplicate_employee_no_on_create_returns_409_not_500(self):
         Employee.objects.create(full_name="First Person", employee_no="EMP-100")
@@ -393,9 +342,7 @@ class EmployeeUniqueConstraintTests(AuthenticatedAPITestCase):
         self.assertEqual(second.employee_no, "EMP-201")  # untouched by the failed update
 
     def test_multiple_employees_with_no_employee_no_are_allowed(self):
-        # unique=True in Postgres allows any number of NULLs - only actual
-        # duplicate VALUES collide. Worth pinning down since it's the
-        # opposite of what "unique" might naively suggest.
+        # unique=True allows any number of NULLs in Postgres - only duplicate values collide.
         response1 = self.client.post("/api/employees", {"full_name": "No Badge One"}, format="json")
         response2 = self.client.post("/api/employees", {"full_name": "No Badge Two"}, format="json")
         self.assertEqual(response1.status_code, status.HTTP_201_CREATED, response1.data)
@@ -403,9 +350,7 @@ class EmployeeUniqueConstraintTests(AuthenticatedAPITestCase):
 
 
 class SoftDeleteBehaviorTests(TestCase):
-    """Model-layer tests for BaseModel's soft-delete machinery (core/models.py)
-    - no HTTP involved, these go straight at the ORM to pin down guarantees
-    the model docstrings themselves claim."""
+    """ORM-level, no HTTP - pins down BaseModel's soft-delete guarantees."""
 
     def test_restore_clears_deleted_at_and_reappears_in_default_manager(self):
         employee = Employee.objects.create(full_name="Restorable Person")
@@ -427,13 +372,7 @@ class SoftDeleteBehaviorTests(TestCase):
         self.assertFalse(employee.is_deleted)
 
     def test_hard_deleting_employee_nulls_a_soft_deleted_cards_employee_fk(self):
-        """Employee.Meta.base_manager_name = "all_objects" (cards/models.py)
-        exists for exactly this scenario: Django's on_delete=SET_NULL
-        cascade collector walks related rows using the model's *base*
-        manager - if that were the default (filtered) manager instead, a
-        Card that was ALREADY soft-deleted before the Employee got
-        hard-deleted would be invisible to the collector, and its
-        employee_id would be left dangling at a since-hard-deleted row."""
+        """base_manager_name="all_objects" - else SET_NULL's cascade can't see an already-soft-deleted Card."""
         employee = Employee.objects.create(full_name="Ada Lovelace")
         card = Card.objects.create(uid="HARDDEL01", employee=employee, is_active=True)
 

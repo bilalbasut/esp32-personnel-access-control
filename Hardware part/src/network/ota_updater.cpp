@@ -41,10 +41,7 @@ bool OTAUpdater::performOTA(const String& url, const String& expectedMd5, uint32
         return false;
     }
 
-    // Ethernet kütüphanesinde hazır bir HTTP client yok, bu yüzden GET isteği
-    // ve header parse'ı burada elle yapılıyor: status satırını oku, header'ları
-    // boş satıra kadar oku (sadece Content-Length ile ilgileniyoruz), sonrasını
-    // ham byte akışı olarak Update.write()'a stream ediyoruz.
+    // Ethernet kütüphanesinde hazır HTTP client yok - GET/header parse elle yapılıyor.
     otaClient.printf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path.c_str(), host.c_str());
 
     unsigned long headerWaitStart = millis();
@@ -94,10 +91,7 @@ bool OTAUpdater::performOTA(const String& url, const String& expectedMd5, uint32
     while (totalWritten < (uint32_t)contentLength) {
         esp_task_wdt_reset();
 
-        // İki ayrı zaman aşımı var: OTA_STALL_TIMEOUT_MS "veri akışı durdu mu"
-        // (aşağıda lastDataMs ile), OTA_TOTAL_TIMEOUT_MS ise "indirme bir
-        // türlü bitmiyor" (yavaş ama kesintisiz bir bağlantı da sonsuza kadar
-        // sürmesin diye) - ikisi farklı arıza türlerini yakalıyor.
+        // STALL = veri akışı durdu, TOTAL = yavaş ama kesintisiz bağlantı sonsuza sürmesin.
         if (millis() - downloadStart > OTA_TOTAL_TIMEOUT_MS) {
             Serial.println("OTA: overall timeout exceeded, aborting.");
             Update.abort();

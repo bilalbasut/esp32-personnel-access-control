@@ -1,18 +1,5 @@
-"""Backend test suite - Device CRUD via AuditedModelViewSet (core/audit_viewset.py).
-
-DeviceViewSet no longer writes its own perform_create/update/destroy - it
-gets created_by/updated_by/deleted_by attribution and AuditLog diff entries
-for free from the AuditedModelViewSet mixin (devices/views.py). Device is
-also the one ViewSet that uses the mixin with ZERO extra side effects
-(unlike Card, which also republishes ACL - see cards/tests.py
-CardAttributionTests for that wrapped case), so it's the cleanest place to
-pin down the mixin's own behaviour.
-
-DeviceUnauthenticatedAccessTests below is the regression test for the other
-half of this pass: DEFAULT_PERMISSION_CLASSES=[IsAuthenticated]
-(config/settings.py) must actually reject an unauthenticated request before
-it reaches the view, not just leave attribution fields empty.
-"""
+"""Device CRUD via AuditedModelViewSet - no extra side effects (unlike Card's ACL republish),
+cleanest place to pin down the mixin's own behavior."""
 from unittest.mock import patch
 
 from django.test import override_settings
@@ -93,8 +80,7 @@ class DeviceAttributionTests(AuthenticatedAPITestCase):
 
 
 class DeviceUnauthenticatedAccessTests(APITestCase):
-    """Deliberately does NOT use AuthenticatedAPITestCase - the whole point
-    is an unauthenticated self.client."""
+    """Deliberately unauthenticated self.client."""
 
     def test_list_devices_without_token_returns_401(self):
         response = self.client.get("/api/devices")
@@ -107,12 +93,7 @@ class DeviceUnauthenticatedAccessTests(APITestCase):
 
 
 class DeviceCommandActionTests(AuthenticatedAPITestCase):
-    """DeviceViewSet.send_command (devices/views.py) - not part of
-    AuditedModelViewSet's standard create/update/destroy, so it still hand-
-    calls log_action() itself; these confirm that call actually happens,
-    and that a bad command or a broken MQTT publish are handled distinctly
-    (400 for a validation problem the caller can fix, 500 for an
-    infrastructure problem they can't)."""
+    """send_command hand-calls log_action() (not standard CRUD) - bad command is 400, broker failure is 500."""
 
     def setUp(self):
         super().setUp()
@@ -161,20 +142,12 @@ class DeviceCommandActionTests(AuthenticatedAPITestCase):
             f"/api/devices/{self.device.id}/command", {"cmd": "reboot"}, format="json"
         )
         self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
-        # log_action() is called AFTER the publish succeeds (devices/views.py
-        # send_command) - a broker failure must not leave a misleading "this
-        # command was issued" audit trail behind.
-        self.assertFalse(AuditLog.objects.filter(action="device.command").exists())
+        self.assertFalse(AuditLog.objects.filter(action="device.command").exists())  # no misleading audit trail
 
 
 @override_settings(PANEL_BASE_URL="http://panel.test.local")
 class DeviceOtaActionTests(AuthenticatedAPITestCase):
-    """DeviceViewSet.ota (devices/views.py) - looks up a Firmware row,
-    validates its md5, and builds the OTA download URL the ESP32 will hit
-    (FirmwareViewSet.download, AllowAny - see core/tests.py
-    FirmwareDownloadTests). Each failure mode here (unknown version, bad
-    md5, unconfigured PANEL_BASE_URL) is deliberately a distinct guard in
-    the view, not just a generic error path."""
+    """Each failure mode (unknown version, bad md5, missing PANEL_BASE_URL) is a distinct guard in the view."""
 
     def setUp(self):
         super().setUp()
@@ -198,17 +171,12 @@ class DeviceOtaActionTests(AuthenticatedAPITestCase):
 
     @patch("core.mqtt_utils.publish")
     def test_version_with_leading_v_prefix_still_resolves(self, mock_publish):
-        # devices/views.py ota() tolerates a "v" prefix (raw_version.lstrip("v"))
-        # for whichever of the two forms ISN'T already an exact match - here
-        # the registry has "3.0.0-test" (no "v"), so "v3.0.0-test" only
-        # resolves via the second fallback in the lookup chain.
+        # Registry has "3.0.0-test" (no "v"); "v3.0.0-test" resolves via the lstrip("v") fallback.
         response = self.client.post(
             f"/api/devices/{self.device.id}/ota", {"version": "v3.0.0-test"}, format="json"
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
-        # The URL must reference the REGISTRY's version string, not whatever
-        # the caller happened to type.
-        self.assertIn("/api/firmware/3.0.0-test/download", response.data["ota_url"])
+        self.assertIn("/api/firmware/3.0.0-test/download", response.data["ota_url"])  # registry's version, not caller's
 
     def test_unknown_firmware_version_returns_404(self):
         with patch("core.mqtt_utils.publish") as mock_publish:

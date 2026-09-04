@@ -8,16 +8,7 @@ VALID_COMMANDS = {"open", "sync", "reboot", "settime"}
 class DeviceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Device
-        # BİLEREK "__all__" DEĞİL: Device artık BaseModel'den created_by/
-        # updated_by/deleted_by/deleted_at gibi bookkeeping alanları
-        # taşıyor - "__all__" bunları DA client'ın PATCH/POST body'sinden
-        # doğrudan yazabileceği alanlar yapardı (örn. bir istemci deleted_at'i
-        # elle set edip delete()'i, dolayısıyla audit log'u ve is_active
-        # senkronunu hiç tetiklemeden bir satırı "silinmiş" gösterebilirdi).
-        # created_at/updated_at/created_by/updated_by görüntülemek için
-        # read-only olarak dahil edildi (bkz. read_only_fields);
-        # deleted_at/deleted_by hiç dahil edilmedi - onlar sadece delete()
-        # üzerinden değişmeli (core/audit_viewset.py AuditedModelViewSet).
+        # "__all__" değil: client PATCH ile deleted_at'i elle set edip delete()'i (ve audit'i) atlayabilirdi.
         fields = [
             "id", "name", "floor", "location", "ip_address", "mac_address",
             "last_seen_at", "status", "fw", "queue_depth", "heap_free",

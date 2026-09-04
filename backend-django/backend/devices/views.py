@@ -17,13 +17,7 @@ from devices.serializers import DeviceCommandSerializer, DeviceOTASerializer, De
 
 
 def _next_cmd_seq():
-    """Modül seviyesinde bir itertools.count() yerine core'un migration'larında
-    oluşturulmuş 'cmd_sequence' Postgres sequence'inden çekiyor. Process-içi
-    sayaç sadece TEK worker process'te doğru çalışır - README'nin önerdiği
-    `gunicorn --workers N` altında her worker kendi import anından başlayan
-    kendi sayacına sahip olur, yani farklı worker'ların işlediği istekler
-    çakışan/tekrar eden seq numaraları dağıtır. Asıl çözüm bir DB sequence -
-    core/acl.py'nin ACL versiyonlarını zaten aynı şekilde kaynaklamasıyla aynı mantık."""
+    """Postgres sequence, process-içi sayaç değil - gunicorn çoklu worker'da her worker'ın kendi sayacı olur, seq çakışır."""
     with connection.cursor() as cursor:
         cursor.execute("SELECT nextval('cmd_sequence')")
         return cursor.fetchone()[0]

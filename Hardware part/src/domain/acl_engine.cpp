@@ -60,13 +60,7 @@ void ACLEngine::loadAclToRAM() {
     Serial.printf("Binary ACL loaded: %d records\n", aclList.size());
 }
 
-// RFID okuyucudan gelen her kart, buradan geçip GRANTED/UNKNOWN/EXPIRED/
-// SCHEDULE sonuçlarından birine bağlanıyor. Kontroller kasıtlı olarak bu
-// sırada: önce kart hiç tanınıyor mu (UNKNOWN), sonra süresi dolmuş mu
-// (EXPIRED), sonra bu kat için yetkili mi, en son da zaman penceresi
-// (SCHEDULE) - yani "kart hiç yok" ile "kart var ama şu an giremez"
-// durumları backend'e/loglara farklı result kodlarıyla düşüyor, ikisi de
-// aynı "UNKNOWN" içine gizlenmiyor (kat kontrolü hariç - bkz. aşağıdaki not).
+// Kontrol sırası kasıtlı: UNKNOWN -> EXPIRED -> kat -> saat penceresi, her başarısızlık ayrı result koduna düşsün diye.
 uint8_t ACLEngine::evaluateAccess(const uint8_t* scannedUid, uint8_t uidLen, const DateTime& now) {
     AclRecord target = {};
     memcpy(target.uid, scannedUid, uidLen);
@@ -74,11 +68,7 @@ uint8_t ACLEngine::evaluateAccess(const uint8_t* scannedUid, uint8_t uidLen, con
 
     uint8_t result = RESULT_UNKNOWN;
 
-    // Mutex'i sonsuza kadar değil 100ms timeout ile bekliyoruz: bu fonksiyon
-    // RFID okuma anında çağrılıyor ve kapı kilidi/buzzer bu sonuca bağlı -
-    // ACL güncellemesi (processACLUpdate) aynı mutex'i tutarken bloklarsak
-    // kullanıcı kartını okuttuğunda cihaz donmuş gibi görünmesin diye kısa
-    // bir süre bekleyip pes ediyoruz (sonuç UNKNOWN'da kalır).
+    // 100ms timeout, sonsuz değil: kart okutulduğunda kapı donmuş görünmesin, ACL update mutex'i tutuyorsa UNKNOWN'a düş.
     if (xSemaphoreTake(aclMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         auto it = std::lower_bound(aclList.begin(), aclList.end(), target, compareAclRecords);
         
@@ -91,18 +81,12 @@ uint8_t ACLEngine::evaluateAccess(const uint8_t* scannedUid, uint8_t uidLen, con
             result = RESULT_EXPIRED;
 
         // 3. Floor Bitmask Check
-        // Not: burada da UNKNOWN dönüyoruz, EXPIRED gibi ayrı bir kod yok -
-        // yani "kartın süresi dolmuş" ile "kart bu katta yetkili değil" dışarıdan
-        // ayırt edilemiyor. Bilinçli mi yoksa gözden kaçmış mı emin değilim,
-        // gerekirse ayrı bir result kodu (backend'deki MAP_RESULT'a da eklenerek) düşünülebilir.
+        // Not: kat yetkisizliği de UNKNOWN döner, ayrı bir result kodu yok - kasıtlı mı emin değilim.
         } else if ((it->floor_mask & (1UL << FLOOR_NUMBER)) == 0) {
             result = RESULT_UNKNOWN;
 
-        // 4. Schedule Window Check (Cross-midnight & UTC-safe)
-        // win_start_m/win_end_m gün içi dakika (0-1439). start<=end ise normal
-        // aralık (örn. 08:00-19:00); start>end ise gece yarısını aşan bir
-        // pencere demektir (örn. 22:00-06:00 gece vardiyası) - bu yüzden iki
-        // ayrı karşılaştırma mantığı var.
+        // 4. Schedule Window Check
+        // start>end gece yarısını aşan pencere demek (örn. 22:00-06:00), bu yüzden iki ayrı karşılaştırma var.
         } else if (!(it->win_start_m == 0 && it->win_end_m == 1440)) {
             uint16_t currentMinute = (now.hour() * 60) + now.minute();
             bool inWindow = (it->win_start_m <= it->win_end_m)
@@ -142,9 +126,7 @@ void ACLEngine::processACLUpdate(std::vector<uint8_t>& pendingBytes) {
         return;
     }
 
-    // Versiyon geriye gitmiyorsa veya aynıysa yok say - broadcast bir ACL
-    // mesajı yeniden gelirse (retained MQTT mesajı, reconnect sonrası
-    // tekrar subscribe vs.) flash'a gereksiz yazım yapılmasın diye.
+    // Retained/tekrar gelen aynı ACL mesajı gereksiz flash yazımı yapmasın diye.
     if (newVersion <= currentAclVersion) {
         pendingBytes.clear();
         return;
@@ -157,7 +139,6 @@ void ACLEngine::processACLUpdate(std::vector<uint8_t>& pendingBytes) {
         return;
     }
 
-    // Write all records directly to flash in one contiguous operation
     const uint8_t* recordsPtr = pendingBytes.data() + sizeof(AclHeader);
     size_t bytesToWrite = cardCount * sizeof(AclRecord);
 
@@ -167,16 +148,10 @@ void ACLEngine::processACLUpdate(std::vector<uint8_t>& pendingBytes) {
     dbFile.flush();
     dbFile.close();
 
-    // Free reception buffer immediately
     pendingBytes.clear();
     pendingBytes.shrink_to_fit();
 
-    // Atomic file swap - önce yeni veriyi ayrı bir .tmp dosyasına yazdık,
-    // şimdi eskiyi .bak'a taşıyıp .tmp'yi .bin yapıyoruz. Amaç: yazma
-    // sırasında elektrik kesilirse (kapı okuyucularda bu gerçek bir risk)
-    // yarım kalmış bir database.bin ile kalmamak - her adımda ya eski dosya
-    // ya yeni dosya bütün halde duruyor. EventQueue::init() de açılışta
-    // .bak'tan otomatik kurtarma yapıyor (bkz. o dosyadaki RECOVERY log'u).
+    // tmp->bak->bin atomic swap: güç kesilirse hep bütün bir dosya kalır, yarım database.bin olmaz.
     if (LittleFS.exists("/database.bin")) LittleFS.rename("/database.bin", "/database.bak");
     if (!LittleFS.rename("/database.tmp", "/database.bin")) {
         Serial.println("ERROR: ACL file rename failed.");
@@ -185,7 +160,6 @@ void ACLEngine::processACLUpdate(std::vector<uint8_t>& pendingBytes) {
     }
     if (LittleFS.exists("/database.bak")) LittleFS.remove("/database.bak");
 
-    // Load newly saved binary records into RAM
     loadAclToRAM();
     currentAclVersion = newVersion;
     aclPreferences.putUInt("aclVer", currentAclVersion);

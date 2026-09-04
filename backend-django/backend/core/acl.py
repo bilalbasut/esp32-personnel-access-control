@@ -1,19 +1,5 @@
-"""
-Binary ACL yayınlayıcısı - orijinal server.js'deki publishAclUpdate()'in
-birebir portu.
-
-Wire Format:
-  Header (8 bytes):
-    - ver:        uint32 LE (4 bytes)
-    - card_count: uint32 LE (4 bytes)
-  Records (20 bytes each):
-    - uid:          7 bytes (raw hex bytes, padded with 0x00)
-    - uidLen:       uint8   (1 byte)
-    - floor_mask:   uint32 LE (4 bytes)
-    - valid_to:     uint32 LE (4 bytes)
-    - win_start_m:  uint16 LE (2 bytes)
-    - win_end_m:    uint16 LE (2 bytes)
-"""
+"""Wire format must match the firmware parser exactly: 8B header (ver u32, count u32)
++ 20B/record (uid[7], uidLen u8, floor_mask u32, valid_to u32, win_start_m u16, win_end_m u16), all LE."""
 import struct
 
 from django.conf import settings
@@ -94,10 +80,7 @@ def build_acl_buffer(cards, version):
         utc_start_m = local_start_m
         utc_end_m = local_end_m
 
-        # Sadece tam gün erişim (0-1440) değilse çevir - server.js ile aynı.
-        # Firmware her zaman UTC dakika bekliyor (bkz. acl_engine.cpp
-        # evaluateAccess), pencereler burada local (Türkiye) saatle
-        # girildiği için ikisi arasında fark var.
+        # Tam gün değilse local (TR) saatten firmware'in beklediği UTC dakikaya çevir.
         if not (local_start_m == 0 and local_end_m == 1440):
             tz_offset_minutes = settings.TZ_OFFSET_MINUTES  # Türkiye = +180 dk
 

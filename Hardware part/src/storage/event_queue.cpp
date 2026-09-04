@@ -38,12 +38,8 @@ bool EventQueue::readEventRecord(uint32_t index, AccessRecord& record) {
     return readBytes == sizeof(record);
 }
 
-// Kuyruk dolarsa (MAX_EVENTS'e ulaştıysa) en eski kayıt silinmeden üzerine
-// yazılır - yani backend uzun süre erişilemez olursa cihaz yeni event'leri
-// reddetmek yerine en eski geçmişi feda ediyor (en güncel olay her zaman
-// tercih ediliyor). Bu bir kapasite/politika kararı, kayıp sessizce olmasın
-// diye queueOverflowCount sayaç tutuluyor ve heartbeat ile backend'e
-// bildiriliyor (bkz. NetworkManager heartbeat "qOverflow").
+// Kuyruk dolunca en eski kayıt sessizce üzerine yazılır (yeni event reddedilmez);
+// kayıp sessiz kalmasın diye queueOverflowCount heartbeat'te "qOverflow" olarak raporlanır.
 static bool evictOldestIfFull() {
     bool wasFull = false;
     portENTER_CRITICAL(&queueMux);
@@ -55,13 +51,8 @@ static bool evictOldestIfFull() {
     return wasFull;
 }
 
-// read/write pointer'lar ve queueCount her event'te değil, periyodik olarak
-// (CHECKPOINT_EVENT_INTERVAL / CHECKPOINT_ACK_INTERVAL) Preferences'e
-// yazılıyor (flash aşınmasını/performansı düşünerek). Yani açılışta bu
-// checkpoint, son birkaç event'i yansıtmıyor olabilir - bu fonksiyon
-// /events.bin dosyasının tamamını tarayıp geçerli (CRC'si tutan) kayıtlardan
-// gerçek write pointer'ı ve en yüksek seq'i yeniden hesaplıyor, böylece
-// checkpoint eski kalmış olsa bile kuyruk tutarlı hale geliyor.
+// Checkpoint periyodik yazılır (flash aşınması için), açılışta eski kalmış olabilir -
+// bu fonksiyon /events.bin'i CRC-geçerli kayıtlara göre tarayıp pointer'ları yeniden kurar.
 static void rebuildQueueState() {
     uint32_t newestSeq = 0;
     int newestIndex = -1;
