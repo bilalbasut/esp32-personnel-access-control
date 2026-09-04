@@ -4,6 +4,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from accounts.models import Operator
+from core.test_utils import AuthenticatedAPITestCase
 
 
 class JWTAuthFlowTests(APITestCase):
@@ -105,3 +106,61 @@ class JWTAuthFlowTests(APITestCase):
 
         retry = self.client.post("/api/auth/logout", {"refresh": refresh}, format="json")  # untouched by failed attempt
         self.assertEqual(retry.status_code, status.HTTP_200_OK)
+
+
+class OperatorManagementTests(AuthenticatedAPITestCase):
+    """AuthenticatedAPITestCase's self.operator is role="operator" (model default) - non-admin by default."""
+
+    def _make_admin(self):
+        admin = Operator.objects.create_user(username="admin-tester", password="irrelevant", role=Operator.ROLE_ADMIN)
+        self.client.force_authenticate(user=admin)
+        return admin
+
+    def test_non_admin_cannot_list_operators(self):
+        response = self.client.get("/api/operators")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_non_admin_cannot_create_operator(self):
+        response = self.client.post(
+            "/api/operators", {"username": "sneaky", "password": "irrelevant-not-checked"}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(Operator.objects.filter(username="sneaky").exists())
+
+    def test_unauthenticated_cannot_list_or_create(self):
+        self.client.force_authenticate(user=None)
+        self.assertEqual(self.client.get("/api/operators").status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(self.client.post("/api/operators", {}, format="json").status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_admin_can_create_operator_with_hashed_password(self):
+        self._make_admin()
+        response = self.client.post(
+            "/api/operators",
+            {"username": "new-op", "password": "s3cure-enough!", "role": Operator.ROLE_OPERATOR},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertNotIn("password", response.data)
+
+        created = Operator.objects.get(username="new-op")
+        self.assertNotEqual(created.password, "s3cure-enough!")  # hashed, not plaintext
+        self.assertTrue(created.check_password("s3cure-enough!"))
+
+    def test_admin_can_list_operators(self):
+        admin = self._make_admin()
+        response = self.client.get("/api/operators")
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        usernames = [op["username"] for op in response.data]
+        self.assertIn(admin.username, usernames)
+
+    def test_create_short_password_returns_400(self):
+        self._make_admin()
+        response = self.client.post(
+            "/api/operators", {"username": "weak-pw", "password": "short"}, format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_operator_update_and_delete_are_not_exposed(self):
+        admin = self._make_admin()
+        response = self.client.patch(f"/api/operators/{admin.id}", {"role": Operator.ROLE_OPERATOR}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)

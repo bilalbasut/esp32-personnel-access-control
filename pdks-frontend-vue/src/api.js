@@ -203,6 +203,14 @@ export const api = {
   },
   getMe: () => request('/api/auth/me'),
 
+  // Operators (admin-only backend-side, see accounts/permissions.py IsAdmin)
+  getOperators: () => request('/api/operators'),
+  createOperator: (data) =>
+    request('/api/operators', {
+      method: 'POST',
+      body: data,
+    }),
+
   // Events
   getEvents: () => request('/api/events'),
 

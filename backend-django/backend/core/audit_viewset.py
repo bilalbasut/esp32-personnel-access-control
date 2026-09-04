@@ -12,6 +12,7 @@ _JSON_SAFE_SCALARS = (str, int, float, bool)
 _BOOKKEEPING_FIELDS = frozenset({
     "created_at", "updated_at", "deleted_at",
     "created_by", "updated_by", "deleted_by",
+    "password",  # Operator.password - hash'i bile audit log'a yazılmasın
 })
 
 

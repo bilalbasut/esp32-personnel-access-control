@@ -5,7 +5,7 @@ from django.views.static import serve as static_serve
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
-from accounts.views import LogoutView, MeView
+from accounts.views import LogoutView, MeView, OperatorViewSet
 from devices.views import DeviceViewSet
 from cards.views import CardViewSet, EmployeeViewSet
 from core.views import EventViewSet, FirmwareViewSet, PdksReportView
@@ -16,6 +16,7 @@ router.register(r"cards", CardViewSet, basename="card")
 router.register(r"employees", EmployeeViewSet, basename="employee")
 router.register(r"events", EventViewSet, basename="event")
 router.register(r"firmware", FirmwareViewSet, basename="firmware")
+router.register(r"operators", OperatorViewSet, basename="operator")  # admin-only, bkz. accounts/permissions.py
 
 urlpatterns = [
     path("api/", include(router.urls)),  # + @action sub-routes: command/ota, add/revoke/assign, upload

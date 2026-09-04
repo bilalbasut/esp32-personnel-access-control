@@ -7,7 +7,8 @@ import FirmwareView from '../views/FirmwareView.vue';
 import ReportsView from '../views/ReportsView.vue';
 import AuditLogView from '../views/AuditLogView.vue';
 import LoginView from '../views/LoginView.vue';
-import { isAuthenticated } from '../api';
+import OperatorsView from '../views/OperatorsView.vue';
+import { api, isAuthenticated } from '../api';
 
 const routes = [
   { path: '/login', name: 'Login', component: LoginView, meta: { public: true } },
@@ -18,6 +19,7 @@ const routes = [
   { path: '/firmware', name: 'Firmware', component: FirmwareView },
   { path: '/reports', name: 'Reports', component: ReportsView },
   { path: '/audit', name: 'AuditLog', component: AuditLogView },
+  { path: '/operators', name: 'Operators', component: OperatorsView, meta: { adminOnly: true } },
 ];
 
 export const router = createRouter({
@@ -32,7 +34,7 @@ export const router = createRouter({
 // yönlendirmek), asıl güvenlik hâlâ backend'de. Sadece localStorage'da bir
 // access token VAR MI'ya bakıyor - süresi dolmuş olabilir, o durumda ilk
 // API çağrısı api.js'in kendi 401->refresh->(başarısızsa)login akışına düşer.
-router.beforeEach((to) => {
+router.beforeEach(async (to) => {
   const publicRoute = to.meta.public === true;
   const authed = isAuthenticated();
 
@@ -41,6 +43,16 @@ router.beforeEach((to) => {
   }
   if (publicRoute && authed && to.name === 'Login') {
     return { name: 'Dashboard' };
+  }
+  // UX-only, same as the authed check above - the real enforcement is IsAdmin
+  // on the backend (accounts/permissions.py), this just avoids a 403-filled page.
+  if (to.meta.adminOnly) {
+    try {
+      const me = await api.getMe();
+      if (me.role !== 'admin') return { name: 'Dashboard' };
+    } catch {
+      return { name: 'Login', query: { redirect: to.fullPath } };
+    }
   }
   return true;
 });

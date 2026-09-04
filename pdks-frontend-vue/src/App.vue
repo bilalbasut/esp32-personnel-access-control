@@ -86,6 +86,11 @@ const logout = async () => {
             <span class="me-2">💾</span> OTA Firmware
           </RouterLink>
         </li>
+        <li v-if="me && me.role === 'admin'" class="nav-item">
+          <RouterLink to="/operators" class="nav-link text-white-50">
+            <span class="me-2">🔑</span> Operators
+          </RouterLink>
+        </li>
       </ul>
       <div class="px-2 py-2 mt-auto border-top border-secondary small text-white-50">
         <div v-if="me" class="mb-2">
