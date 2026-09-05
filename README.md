@@ -1,3 +1,9 @@
+# ESP32-Based Ethernet PDKS and Floor-Based Access Control System
+
+*This document is written primarily in Turkish, the working language of this internship project. An English translation is included at the end of this file — jump to [English Version](#english-version).*
+
+---
+
 # ESP32 Tabanlı Ethernet PDKS ve Katlı Geçiş Kontrol Sistemi
 
 Çok katlı(veya güvenlik seviyeli) bir bina için RFID kartlı geçiş kontrol ve personel devam kontrol sistemi (PDKS). Her kat girişine bir ESP32 tabanlı "kapı ünitesi" yerleştirilir; kart okutulduğunda erişim kararı **her zaman cihazın kendi üzerinde**, yerel yetki listesine (ACL) bakılarak verilir. Ağ/sunucu/broker erişilemez olsa bile kapılar kilitlenmez, geçişler yerel yetki listesine göre sürmeye devam eder ve üretilen tüm kayıtlar cihaz üzerinde kalıcı olarak saklanıp bağlantı geri geldiğinde tek bir kayıt bile kaybolmadan/tekrarlanmadan sunucuya aktarılır.
@@ -208,3 +214,219 @@ Detaylı kurulum, API uç noktaları, veri modeli ve test talimatları için **`
 - Orijinal görev tanımı: `ESP32_PDKS_Staj_Projesi.pdf`
 - Backend/API detayları: `backend-django/README.md`
 - ESP32 Teknik Referans Kılavuzu ve ESP32-WROOM-32 veri sayfası (Espressif)
+
+---
+
+<a name="english-version"></a>
+# English Version
+
+# ESP32-Based Ethernet PDKS and Floor-Based Access Control System
+
+Multi-floor (or security-tiered) building RFID card-based access control and personnel attendance tracking system (PDKS – Personel Devam Kontrol Sistemi). An ESP32-based "door unit" is installed at each floor entrance; when a card is scanned, the access decision is **always made on the device itself**, based on its local authorization list (ACL). Even if the network/server/broker becomes unreachable, doors are not locked out — access continues to be granted based on the local ACL, and every generated record is stored persistently on the device and transferred to the server once connectivity returns, without a single record being lost or duplicated.
+
+This document contains the hardware and firmware details needed to set up the system from scratch. For details on the backend (Django API), the MQTT collector service, and the web panel, see `backend-django/README.md`.
+
+The project's original task specification is in `ESP32_PDKS_Staj_Projesi.pdf`. This README explicitly calls out three points where the implementation deviates from that document: the real-time clock module (PCF8563 instead of DS3231), the door position (magnetic) sensor (not used), and MQTT encryption (left out of scope).
+
+## Table of Contents
+
+1. [System Architecture](#1-system-architecture)
+2. [Hardware Setup](#2-hardware-setup)
+3. [Firmware](#3-firmware)
+4. [Backend Summary (High-Level)](#4-backend-summary-high-level)
+5. [Known Limitations / Out-of-Scope Items](#5-known-limitations--out-of-scope-items)
+6. [References](#6-references)
+
+## 1. System Architecture
+
+```
+RFID card → MFRC522 → ESP32 (local ACL + decision) → relay/turnstile
+                              │
+                              ├─ the event is always written to flash first (never waits in RAM)
+                              └─ published to the server over MQTT (QoS1) → collector service → PostgreSQL → web panel
+```
+
+Design principles (identical to §2.1 of the project specification, unchanged):
+
+- **The decision is made locally.** When a card is read, no question is sent to the server; the device's own copy of the ACL is checked.
+- **A record never waits in RAM.** The event is written to persistent memory (flash) before the relay is energized.
+- **Deletion only happens after acknowledgment.** The queue pointer only advances once an ACK is received from the server.
+- **Retransmission is accepted, duplication is not.** QoS1 can deliver the same message twice; deduplication is done server-side (by device ID + sequence number).
+- **`delay()` is never used anywhere.** All timing is based on `millis()`/FreeRTOS.
+
+## 2. Hardware Setup
+
+### 2.1 Bill of Materials (Per Door Unit)
+
+| # | Component | Used | Role |
+|---|---------|-----------|-------|
+| 1 | Microcontroller | ESP32-WROOM-32 DevKit v1 (30/38 pin) | Main processor |
+| 2 | Ethernet module | W5500 (SPI) | Wired network connection |
+| 3 | RFID reader | MFRC522 (13.56 MHz) | Card/tag reading |
+| 4 | RFID card/tag | Mifare Classic 1K | Test users |
+| 5 | Real-time clock | **PCF8563** (I2C) | Accurate timestamps while offline — see note below |
+| 6 | Relay | Bare **SRD-05VDC-SL-C** (5V coil, not a pre-built driver module) | Driving the turnstile/door's dry contact |
+| 7 | Relay driver | **2N2222A** NPN transistor + 330Ω base resistor | Driving the relay coil from a 3.3V logic signal — see §2.5 |
+| 8 | Indicators | Green + red LED, active buzzer | User feedback |
+| 9 | Input | Exit button | Manual unlock |
+| 10 | Power | 5V/2A adapter + **LM2596 buck module** (set to 3.3V) | Separate 3.3V rail — see §2.4 |
+| 11 | Consumables | Breadboard/perfboard, jumper wires, resistors | Assembly |
+
+**Note (DS3231 → PCF8563):** The project specification recommended the DS3231; the PCF8563 was used instead due to a sourcing issue. Since the firmware uses the `adafruit/RTClib` library, both chips are supported through the same interface, so no code changes were needed (`hal/rtc_service.cpp`, `RTC_PCF8563` class).
+
+**Not used:** The door position (magnetic) sensor and the optional OLED display are not present in this delivery — both were optional/not required in the project specification.
+
+### 2.2 Pin Map
+
+The table below is taken directly from the firmware's actual source (`include/config.h`); it is nearly identical to the reference pin map in the project specification.
+
+| Module / Signal | GPIO | Interface | Note |
+|---|---|---|---|
+| W5500 — SCK / MISO / MOSI | 18 / 19 / 23 | VSPI | Hardware SPI |
+| W5500 — CS | 5 | VSPI | Must stay HIGH at boot (default pull-up is fine) |
+| W5500 — RST | 4 | GPIO | 1ms LOW pulse at startup (`network_manager.cpp`) |
+| MFRC522 — SCK / MISO / MOSI | 14 / 27 / 13 | HSPI | **Separate SPI bus from the W5500** — sharing the same bus causes CS conflicts / random hangs (see §5) |
+| MFRC522 — SS (CS) | 15 | HSPI | HIGH at boot, which is fine since idle CS is HIGH |
+| MFRC522 — RST | — | — | Not driven in software; the module's RST pin is hard-wired to 3.3V (always active in hardware) |
+| PCF8563 — SDA / SCL | 21 / 22 | I2C | Address 0x51 |
+| Relay trigger | 32 | GPIO output | Through the 2N2222A transistor — does not drive the coil directly, see §2.5 |
+| Buzzer | 33 | GPIO output | Active buzzer, driven directly |
+| Green LED | 25 | GPIO output | 220–330Ω series resistor |
+| Red LED | 17 | GPIO output | 220–330Ω series resistor |
+| Exit button | 35 | GPIO **input** | Input-only pin, no internal pull-up — **an external 10kΩ pull-up is mandatory**, see §2.3 |
+
+**Pin warnings (ESP32-WROOM-32 hardware constraints):** GPIO6–11 are reserved for the internal flash and cannot be used. GPIO34/35/36/39 are input-only and have no internal pull-up/pull-down. GPIO12 (MTDI) is a strapping pin; if pulled HIGH at boot, the board fails to start — which is why it is not used in the map above. Pin assignments can be changed if needed, but these constraints must be respected.
+
+### 2.3 What Is a Pull-Up Resistor? (Exit Button Example)
+
+When a digital input pin is left unconnected ("floating"), its voltage is undefined; electrical noise can randomly flip the pin between HIGH and LOW, causing false triggers even when the button isn't pressed. A **pull-up resistor** connects the pin to the supply voltage (3.3V) through a resistor, holding the pin's default (button-not-pressed) state reliably at HIGH; when the button is pressed, the pin is pulled to GND and reads a clean LOW.
+
+Circuit: `3.3V → 10kΩ resistor → GPIO35 → button → GND`.
+
+The ESP32's GPIO35 (along with 34/36/39) is an input-only pin and has **no** internal pull-up/pull-down circuitry — meaning a software-only solution like `pinMode(pin, INPUT_PULLUP)` does not work here; the resistor must be physically present in the circuit. The firmware also applies a 50ms debounce (`EXIT_DEBOUNCE_MS`, `hal/io_controller.cpp`) so that mechanical contact bounce doesn't register a single press as multiple presses.
+
+### 2.4 Power Architecture
+
+The system has two separate voltage rails: **5V** (relay coil + main input) and **3.3V** (ESP32, W5500, MFRC522, PCF8563, LEDs — the entire logic/signal circuitry).
+
+**Why the ESP32's own 3.3V is not used:** The ESP32 DevKit board's onboard 3.3V regulator can struggle during sudden current spikes such as Wi-Fi/Ethernet activity; the W5500 module itself can momentarily draw ~150–200mA. Putting this extra load on the board's small onboard regulator was causing random reboots and brownout errors (this risk is also specifically called out in §9 of the project specification). For this reason, instead of using the ESP32's own 3.3V pin/regulator, the entire 3.3V logic rail (including the ESP32 itself) is powered from a separate external regulator with sufficient current capacity.
+
+**Regulator used:** An LM2596 buck (step-down) module, output set to 3.3V, capable of supplying up to 2A without a heatsink (one of the two options suggested in the project specification — the buck alternative was chosen over the AMS1117 linear regulator).
+
+**Power flow:**
+```
+5V/2A adapter ──┬── LM2596 (input) ── LM2596 (output, 3.3V) ── ESP32 (3.3V pin) + W5500 + MFRC522 + PCF8563 + LEDs
+                └── Relay coil (+) directly from 5V
+```
+There is a single main power source, from which both direct 5V (relay coil) and regulated 3.3V (logic circuit) are derived.
+
+**Capacitors:** A **100nF (ceramic) + 470µF (electrolytic)** parallel capacitor pair is used at the regulator's input/output — the 100nF suppresses high-frequency switching noise, and the 470µF acts as a short-term energy reservoir during sudden current demand, preventing brownouts. This pair is present both on the LM2596's 3.3V output (ESP32/W5500/MFRC522 side) and on the 5V rail the relay coil is connected to.
+
+**Common ground (GND):** The GND lines of the 5V and 3.3V circuits are joined at a **single point** (star ground) — so that two separate GND return paths don't form and create noise/voltage differences between them.
+
+### 2.5 Relay Driver Circuit (the Single Common Element Between the 5V/3.3V Boundary)
+
+The relay is the **single point** where the 5V (relay coil) and 3.3V (logic) circuits touch. The relay used is not a ready-made "3.3V-triggered driver module" but a bare **SRD-05VDC-SL-C** coil/contact set — meaning connecting it directly to a GPIO would risk both insufficient current (an ESP32 GPIO can safely source around ~12mA, while a relay coil draws many times that) and 5V feeding back into the GPIO. For this reason, a transistor handles the switching in between.
+
+**Circuit:**
+```
+GPIO32 ── 330Ω (base resistor) ── 2N2222A (Base)
+                                 2N2222A (Emitter) ── common GND
+                                 2N2222A (Collector) ── Relay coil (−)
+                                                          Relay coil (+) ── 5V
+```
+
+**How it works:** When GPIO32 goes HIGH (3.3V), a small base current flowing through the 330Ω resistor drives the 2N2222A into saturation; the collector-emitter path behaves nearly like a short circuit, and coil current flows from the 5V rail to GND — the transistor acts here as a **low-side switch**. When the GPIO is LOW, the transistor is in cutoff, no current flows through the coil, and the relay releases.
+
+This means GPIO32 never sees 5V and never drives the coil current directly — it only switches a small base current of a few mA; the entire 5V/high-current side stays on the transistor and the separate 5V rail.
+
+> **Known gap / recommended improvement:** There is currently **no** flyback (freewheeling) diode across the coil. Every time the relay releases, the coil's inductive back-EMF can produce a brief high-voltage spike at the transistor's collector; over time this can both wear out the 2N2222A and increase noise on the same 5V rail. The standard, inexpensive fix is to add a reverse-biased **1N4007** (or similar) diode across the coil terminals (cathode to the 5V side, anode to the collector side). Adding this is recommended — it is not present in the unit as currently delivered.
+
+**Turnstile/lock connection:** In this delivered unit, a physical turnstile or electric lock is **not connected** — the relay contacts (NO/COM) are left open for test/demo purposes. When moving to a real installation, the turnstile/lock is designed to be connected to the relay contacts with its own separate power supply; the relay coil supply and the turnstile supply must be kept independent, with GND joined at a single point only (the same requirement is stated in §3.3 of the project specification).
+
+### 2.6 LED / Buzzer Wiring
+
+- **Green LED (GPIO25) and red LED (GPIO17):** each has a series **220–330Ω** resistor between the GPIO output and the LED anode (the range specified in the project specification; 330Ω was used) — to keep the LED current within the safe limits of both the GPIO and the LED (roughly 10–15mA).
+- **Buzzer (GPIO33):** an active (self-oscillating) buzzer, driven directly from the GPIO — no PWM signal needed; a short beep means accepted, a long beep means denied.
+
+### 2.7 Power Connection Summary
+
+| Module | Powered from |
+|---|---|
+| ESP32, W5500, MFRC522, PCF8563, LEDs | 3.3V (LM2596 output) |
+| Relay coil | 5V (main adapter, direct) |
+| Relay trigger signal (GPIO32) | 3.3V logic — isolated from the 5V side by the transistor (see §2.5) |
+| Turnstile/lock (in a real installation) | Its own separate supply, switched through the relay contacts |
+
+## 3. Firmware
+
+### 3.1 Development Environment
+
+- VS Code + PlatformIO, Arduino framework
+- Board: `esp32doit-devkit-v1`, platform `espressif32@6.10.0`
+- Filesystem: LittleFS
+- Custom partition table (`partitions_two_ota.csv`): two OTA slots (`ota_0` / `ota_1`, ~1.75MB each) plus a separate data partition (holds the persistent event queue and ACL files)
+
+### 3.2 Libraries (`platformio.ini`)
+
+| Library | Role |
+|---|---|
+| `OSSLibraries/Arduino_MFRC522v2` | RFID reading (the official v2 library, cloned from GitHub) |
+| `arduino-libraries/Ethernet` | W5500 TCP/IP stack |
+| `256dpi/MQTT` | MQTT client (QoS1, LWT, retained message support) |
+| `bblanchon/ArduinoJson` | JSON encoding/decoding |
+| `adafruit/RTClib` | RTC (supports both DS3231 and PCF8563) |
+| `arduino-libraries/NTPClient` | Network time synchronization |
+
+### 3.3 Module Structure
+
+| File | Role |
+|---|---|
+| `src/main.cpp` | `setup()`/`loop()`, watchdog, launching the network task on a separate core |
+| `src/hal/io_controller.*` | Relay/LED/buzzer/exit-button state machine — no `delay()`, `millis()`-based |
+| `src/hal/rfid_reader.*` | MFRC522 reading, debounce (5s), triggering the access-event flow |
+| `src/hal/rtc_service.*` | PCF8563 reading, NTP/RTC/invalid time-source management and the "dead reckoning" fallback mechanism |
+| `src/domain/acl_engine.*` | Local authorization list (binary format on LittleFS), binary search, access decision |
+| `src/storage/event_queue.*` | Persistent, append-only event queue, CRC16 verification, checkpointing |
+| `src/network/network_manager.*` | W5500 + MQTT client, QoS1 store-and-forward, command queue |
+| `src/network/ota_guard.*`, `src/network/ota_updater.*` | OTA update and its self-rollback protection |
+
+### 3.4 Building and Flashing
+
+```
+pio run -t upload
+```
+
+(or "Upload" from the PlatformIO panel in VS Code). The serial port is auto-detected; the serial monitor runs at 115200 baud.
+
+In `include/config.h`, each door's `DEVICE_ID`, `FLOOR_NUMBER`, `DEVICE_DIR`, and network settings (static IP, MQTT broker address) are fixed **at compile time** — **each door is flashed with its own binary; the same `.bin` cannot be uploaded to two different doors.** Adding a new door means changing these constants and rebuilding.
+
+After the first flash, the local ACL and persistent queue start out empty; the ACL syncs automatically from the retained MQTT message sent by the backend.
+
+## 4. Backend Summary (High-Level)
+
+- **Django 5 + Django REST Framework**, PostgreSQL database, JWT (access/refresh) authentication, admin/operator role split
+- **Python MQTT collector service** (`collector.py`) — writes to the `access_events`/`devices` tables using raw SQL
+- **Eclipse Mosquitto** broker, port 1883 — no TLS/authentication (see §5)
+- **Vue 3** web panel — employee/card/device management, PDKS report (CSV export), audit log, operator account management
+- All services come up with a single command via `docker-compose.yml`
+
+For detailed setup, API endpoints, the data model, and test instructions, see **`backend-django/README.md`**.
+
+## 5. Known Limitations / Out-of-Scope Items
+
+| Item | Status |
+|---|---|
+| MQTT TLS / authentication | Out of scope (deliberate decision) — the broker runs with `allow_anonymous true`, plain port 1883 |
+| Door position (magnetic) sensor | Not used — optional in the project specification |
+| Turnstile / electric lock | Not physically connected in this delivered unit — relay contacts are ready (see §2.5) |
+| Flyback diode on the relay coil | Missing — adding a 1N4007 is recommended (see §2.5) |
+| Real-time clock | PCF8563 used instead of DS3231 (sourcing issue) |
+| Retained ACL message size | If the card count grows past a few thousand, a single MQTT retained message could hit the packet size limit — pagination/delta publishing may be needed eventually; with the currently allocated 16KB of RAM, up to 800 cards is deliberately left as the limit for this version |
+| RC522/W5500 on the same SPI bus | Deliberately placed on separate SPI buses (VSPI/HSPI) — sharing one bus risks CS conflicts / random hangs |
+
+## 6. References
+
+- Original task specification: `ESP32_PDKS_Staj_Projesi.pdf`
+- Backend/API details: `backend-django/README.md`
+- ESP32 Technical Reference Manual and the ESP32-WROOM-32 datasheet (Espressif)
